@@ -860,3 +860,283 @@ fn r1_p6_a_restarted_server_gets_its_document_before_a_coroutines_request() {
         "the document before the first request about it; the replacement received {seq:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10v.7 and E10v.4b through the daemon, by the GPU's headless probe
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "crdt")]
+fn rename_source() -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for i in 0..40 {
+        let _ = writeln!(text, "// {i}");
+    }
+    text.push_str("fn count(total: u32) -> u32 {\n    let x = total + total;\n    total * x + total\n}\n// tail\n");
+    text
+}
+
+#[cfg(feature = "crdt")]
+fn rename_edit(line: u32, start: u32, end: u32) -> Value {
+    json!({
+        "range": { "start": { "line": line, "character": start },
+                   "end": { "line": line, "character": end } },
+        "newText": "n"
+    })
+}
+
+/// A daemon whose rust server is the fake answering a rename with the
+/// five edits of `rename_source`, `a.rs` visited.
+#[cfg(feature = "crdt")]
+fn rename_daemon(tag: &str) -> (common::daemon::TestDaemon, PathBuf, PathBuf) {
+    let d = dir(tag);
+    let a = d.join("a.rs");
+    std::fs::write(&a, rename_source()).unwrap();
+    let plan = d.join("plan.json");
+    let mut changes = serde_json::Map::new();
+    changes.insert(
+        uri(&a),
+        json!([
+            rename_edit(40, 9, 14),
+            rename_edit(41, 12, 17),
+            rename_edit(41, 20, 25),
+            rename_edit(42, 4, 9),
+            rename_edit(42, 16, 21)
+        ]),
+    );
+    std::fs::write(&plan, json!({ "changes": changes }).to_string()).unwrap();
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.lsp.config.rust = {{ command = '{}', env = {{ \
+           PMACS_FAKE_LSP_MODE = 'applyeditplan', PMACS_FAKE_LSP_EDIT_PLAN = '{}', \
+           PMACS_FAKE_LSP_APPLYEDIT_SINK = '{}', PMACS_FAKE_LSP_PID_SINK = '{}' }} }}\n\
+         pmacs.buffer.find_or_open({:?})\n",
+        fake_lsp_path(),
+        plan.display(),
+        d.join("sink.json").display(),
+        d.join("pids.txt").display(),
+        a.display().to_string()
+    );
+    let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(&[], &init);
+    (daemon, a, d)
+}
+
+/// A guard (review 1's E10v.7 through the daemon). A rename through the daemon a user reaches
+/// (the GPU's production `App` attached by the headless probe): the
+/// answer's edits are the daemon's own, the case only `src/buffer.rs`'s
+/// unit rows witnessed. One `C-x u` takes the whole rename back and puts
+/// the caret where it was; the text is read back by a save.
+#[cfg(feature = "crdt")]
+#[test]
+fn r1_p10_gpu_a_rename_through_the_daemon_is_one_undo_and_its_place() {
+    let (daemon, a, _d) = rename_daemon("gpurename");
+    let right = "tap:C-f ".repeat(22);
+    let steps = format!(
+        "shows:a.rs key:M-x type:goto-line key:ret type:42 key:ret quiet:500 {right}quiet:800 \
+         place:before key:C-c key:r quiet:500 type:n key:ret band:LSP: quiet:800 place:renamed \
+         key:C-x key:u quiet:800 place:undone key:C-x key:C-s quiet:800 place:saved"
+    );
+    let Some(facts) = common::gpu_probe::run_script_probe(daemon.socket_path(), "r1p10", &steps)
+    else {
+        support::record_skip("the GPU probe did not run");
+        return;
+    };
+    let fact = |key: &str| common::gpu_probe::fact(&facts, key).to_owned();
+    let disk = std::fs::read_to_string(&a).unwrap();
+    eprintln!("R1P10 facts {facts:?}");
+    eprintln!("R1P10 disk after the save {disk:?}");
+    assert!(
+        fact("renamed.status").contains("LSP: renamed"),
+        "premise: the rename was applied; facts {facts:?}"
+    );
+    assert_eq!(
+        disk,
+        rename_source(),
+        "one undo took the whole rename back (the save wrote what the buffer held)"
+    );
+    assert_eq!(
+        (fact("undone.line"), fact("undone.col")),
+        (fact("before.line"), fact("before.col")),
+        "the caret back where it was before the rename; facts {facts:?}"
+    );
+}
+
+/// A guard: the same through the daemon for a format, which shares the
+/// applier:
+/// one `C-x u` takes it back whole.
+#[cfg(feature = "crdt")]
+#[test]
+fn r1_p11_gpu_a_format_through_the_daemon_is_one_undo() {
+    let d = dir("gpuformat");
+    let a = d.join("a.rs");
+    let text = "    fn a() {}\nfn b() {}\nlet here = 1;\n0123456789\ntail\n";
+    std::fs::write(&a, text).unwrap();
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.lsp.config.rust = {{ command = '{}' }}\n\
+         pmacs.buffer.find_or_open({:?})\n",
+        fake_lsp_path(),
+        a.display().to_string()
+    );
+    let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(&[], &init);
+    let steps = "shows:a.rs quiet:1500 place:before key:C-c key:f band:LSP: quiet:800 \
+                 place:formatted key:C-x key:u quiet:800 place:undone key:C-x key:C-s quiet:800";
+    let Some(facts) = common::gpu_probe::run_script_probe(daemon.socket_path(), "r1p11", steps)
+    else {
+        support::record_skip("the GPU probe did not run");
+        return;
+    };
+    let disk = std::fs::read_to_string(&a).unwrap();
+    eprintln!("R1P11 facts {facts:?}");
+    eprintln!("R1P11 disk after the save {disk:?}");
+    assert!(
+        common::gpu_probe::fact(&facts, "formatted.status").contains("LSP: applied"),
+        "premise: the format was applied; facts {facts:?}"
+    );
+    assert_eq!(disk, text, "one undo took the whole format back");
+}
+
+/// A guard: a rename through the daemon, one undo, then `C-x r`: the redo puts
+/// the whole rename back.
+#[cfg(feature = "crdt")]
+#[test]
+fn r1_p12_gpu_redo_through_the_daemon_puts_the_rename_back_whole() {
+    let (daemon, a, _d) = rename_daemon("gpuredo");
+    let steps = "shows:a.rs quiet:1500 key:M-x type:goto-line key:ret type:41 key:ret quiet:500 \
+                 tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f tap:C-f \
+                 quiet:800 key:C-c key:r quiet:500 type:n key:ret band:LSP: quiet:800 \
+                 place:renamed key:C-x key:u quiet:800 key:C-x key:r quiet:800 place:redone \
+                 key:C-x key:C-s quiet:800";
+    let Some(facts) = common::gpu_probe::run_script_probe(daemon.socket_path(), "r1p12", steps)
+    else {
+        support::record_skip("the GPU probe did not run");
+        return;
+    };
+    let disk = std::fs::read_to_string(&a).unwrap();
+    let renamed = rename_source()
+        .replace("fn count(total: u32)", "fn count(n: u32)")
+        .replace("let x = total + total;", "let x = n + n;")
+        .replace("total * x + total", "n * x + n");
+    eprintln!("R1P12 facts {facts:?}");
+    eprintln!("R1P12 disk after the save {disk:?}");
+    assert_eq!(disk, renamed, "the redo put the whole rename back");
+}
+
+/// A guard, E10v.4b in the GPU: `M-x lsp.restart` through the GPU's production
+/// `App` restarts the server under the same id and says so.
+#[cfg(feature = "crdt")]
+#[test]
+fn r1_p13_gpu_lsp_restart_through_the_daemon() {
+    let (daemon, _a, d) = rename_daemon("gpurestart");
+    let steps = "shows:a.rs quiet:1500 key:M-x type:lsp.restart key:ret band:LSP: quiet:2000 \
+                 place:after";
+    let Some(facts) = common::gpu_probe::run_script_probe(daemon.socket_path(), "r1p13", steps)
+    else {
+        support::record_skip("the GPU probe did not run");
+        return;
+    };
+    let pids = lines(&d.join("pids.txt"));
+    eprintln!("R1P13 facts {facts:?}; {pids} processes");
+    assert!(
+        common::gpu_probe::fact(&facts, "after.status").starts_with("LSP: restarting") || pids == 2,
+        "the restart said and done; facts {facts:?}; {pids} processes"
+    );
+    assert_eq!(
+        pids, 2,
+        "a second process under the restart; facts {facts:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E10v.5: the panel's visit by RET, in the TUI
+// ---------------------------------------------------------------------------
+
+const B_LINE: &str = "let e = \"\u{1F600}\u{1F600}\"; fn other(total: u32) -> u32 { total }";
+
+fn utf16(line: &str, byte: usize) -> u32 {
+    u32::try_from(line[..byte].encode_utf16().count()).unwrap()
+}
+
+/// A guard: E10v.5's references row reads the panel's row and its stored
+/// column;
+/// this drives the visit a user makes: `M-?` in a TUI, then `RET` on the
+/// panel's row, and reads the cell under the terminal's cursor in the
+/// other file, which holds two emoji before the column.
+#[test]
+fn r1_p14_tui_a_references_visit_by_ret_lands_on_the_other_files_column() {
+    use common::pty::{ScreenTui, spawn_pmacs_in_pty_tapped};
+
+    let d = dir("refvisit");
+    let a = d.join("a.rs");
+    let b = d.join("b.rs");
+    std::fs::write(&a, "// a\nx\nyy\n").unwrap();
+    std::fs::write(&b, format!("// b\n{B_LINE}\n")).unwrap();
+    let at = B_LINE.rfind("total").unwrap();
+    let plan = d.join("results.json");
+    std::fs::write(
+        &plan,
+        json!({ "textDocument/references": [{ "uri": uri(&b), "range": {
+            "start": { "line": 1, "character": utf16(B_LINE, at) },
+            "end": { "line": 1, "character": utf16(B_LINE, at + 5) } } }] })
+        .to_string(),
+    )
+    .unwrap();
+    let config = d.join("config");
+    std::fs::create_dir_all(config.join("pmacs")).unwrap();
+    std::fs::write(
+        config.join("pmacs/init.lua"),
+        format!(
+            "pmacs.lsp.config = {{}}\n\
+             pmacs.lsp.config.rust = {{ command = '{}', env = {{ \
+               PMACS_FAKE_LSP_RESULT_PLAN = '{}' }} }}\n",
+            fake_lsp_path(),
+            plan.display()
+        ),
+    )
+    .unwrap();
+    let file = a.display().to_string();
+    let (pty, tap) = spawn_pmacs_in_pty_tapped(
+        &[&file],
+        &[("HOME", d.as_path()), ("XDG_CONFIG_HOME", config.as_path())],
+        24,
+        100,
+    );
+    let mut tui = ScreenTui::new(pty, tap, 24, 100);
+    let limit = Duration::from_secs(30);
+    tui.wait_for(limit, "the server ready", &|t| {
+        t.screen_contains("LSP:ready")
+    });
+    tui.write(b"\x1b?");
+    tui.wait_for(limit, "the references panel's row", &|t| {
+        t.screen_contains("b.rs:2:")
+    });
+    let panel = tui.describe();
+    tui.write(b"\r");
+    tui.wait_for(limit, "b.rs shown", &|t| {
+        t.screen_contains("b.rs") && t.screen_contains("fn other")
+    });
+    tui.settle(
+        Duration::from_millis(500),
+        Duration::from_secs(10),
+        "the visit settled",
+        &|_| true,
+    );
+    let cursor = tui.cursor();
+    let under: String = cursor
+        .map(|c| {
+            (0..5)
+                .filter_map(|i| tui.char_at(c.row, c.col + i))
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "R1P14 panel {panel}\nafter RET cursor {cursor:?} reads {under:?}\n{}",
+        tui.describe()
+    );
+    assert_eq!(
+        under,
+        "total",
+        "the visit puts the caret on the second `total`; {}",
+        tui.describe()
+    );
+}
