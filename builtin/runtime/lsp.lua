@@ -2131,9 +2131,17 @@ pmacs.lsp.request_semantic_tokens_delta =
 -- server went away mid-request (drain in `lsp.rs`) and
 -- `{ tag = "failed", message = ... }` for a JSON-RPC error response;
 -- a raw dispatch failure surfaces as a plain string.
-local function lsp_await_error(err)
+-- E10v review 1's Low 2: servers the user restarted (`lsp.restart`),
+-- keyed by `tostring(sid)`, until the new generation is initialized or
+-- crashes. A request in flight at the restart is cancelled by it, and
+-- that cancellation is the user's own act, not "server unavailable": it
+-- says nothing, so the echo line keeps the restart's word.
+local user_restarts = {}
+
+local function lsp_await_error(err, sid)
   if type(err) == "table" then
     if err.tag == "cancelled" then
+      if sid and user_restarts[tostring(sid)] then return nil end
       return "server unavailable (request cancelled)"
     elseif err.tag == "failed" then
       return err.message or "server error"
@@ -2141,6 +2149,13 @@ local function lsp_await_error(err)
     return tostring(err.tag or "error")
   end
   return tostring(err)
+end
+
+-- Say an `:await()` failure on the echo line, behind `prefix` ("LSP: "
+-- unless given), unless it is a cancellation by the user's own restart.
+local function say_await_error(sid, err, prefix)
+  local why = lsp_await_error(err, sid)
+  if why then pmacs.editor.set_status((prefix or "LSP: ") .. why) end
 end
 
 -- Cursor positioning ------------------------------------------------------
@@ -3573,12 +3588,14 @@ local function handle_server_requests()
         elseif ev.kind == "restarting" then
           reopen_attachments(sid)
         elseif ev.kind == "crashed" then
+          user_restarts[tostring(sid)] = nil
           -- E5.3: a crash was consumed silently here; it is reported
           -- through `pmacs.error`, marks the modeline `LSP:!` for every
           -- buffer attached to the server, and lists in `*lsp*`.
           note_dead_server(sid, "crashed", ev.reason)
         elseif ev.kind == "initialized" then
           clear_dead_server(sid)
+          user_restarts[tostring(sid)] = nil
           -- Buffers attach before the server finishes initializing, so
           -- the pulls in `attach_buffer` are no-ops for the FIRST file
           -- (their `server_is_initialized` guard is false). This is the
@@ -3635,7 +3652,7 @@ function pmacs.lsp.go_to_definition()
       pmacs.lsp.request_definition(rec.server, rec.uri, line, col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local locs = pmacs.definition.locations(rec.server, rec.uri)
@@ -3757,7 +3774,7 @@ function pmacs.lsp.find_references()
       pmacs.lsp.request_references(rec.server, rec.uri, line, col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local locs = pmacs.references.locations(rec.server, rec.uri)
@@ -3801,7 +3818,7 @@ function pmacs.lsp.document_symbols()
       pmacs.lsp.request_document_symbol(rec.server, rec.uri):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local syms = pmacs.document_symbol.symbols(rec.server, rec.uri)
@@ -3901,7 +3918,7 @@ function pmacs.lsp.workspace_symbols(query)
       pmacs.lsp.request_workspace_symbol(rec.server, query):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local syms = pmacs.workspace_symbol.symbols(rec.server, query)
@@ -3962,7 +3979,7 @@ function pmacs.lsp.inlay_hints()
         rec.server, rec.uri, 0, 0, end_line, end_col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local hints = pmacs.inlay_hint.hints(rec.server, rec.uri)
@@ -4030,7 +4047,7 @@ function pmacs.lsp.semantic_tokens()
       end
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local toks = pmacs.semantic_tokens.tokens(rec.server, rec.uri)
@@ -4070,7 +4087,7 @@ function pmacs.lsp.format_buffer()
       pmacs.lsp.request_formatting(rec.server, rec.uri, 4, true):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local edits = pmacs.formatting.edits(rec.server, rec.uri)
@@ -4162,7 +4179,7 @@ function pmacs.lsp.rename()
             pmacs.lsp.request_rename(rec.server, rec.uri, line, col, new_name):await()
           end)
           if not ok then
-            pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+            say_await_error(rec.server, err)
             return
           end
           local ops = pmacs.rename.ops(rec.server, rec.uri)
@@ -4211,7 +4228,7 @@ function pmacs.lsp.rename()
       pmacs.lsp.request_prepare_rename(rec.server, rec.uri, line, col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local pr = pmacs.prepare_rename.result(rec.server, rec.uri)
@@ -4258,7 +4275,7 @@ local function apply_code_action(rec, act)
         rec.server, act.command.command, act.command.arguments):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: command failed: " .. lsp_await_error(cerr))
+      say_await_error(rec.server, cerr, "LSP: command failed: ")
       return
     end
     table.insert(bits, "ran '" .. act.command.command .. "'")
@@ -4283,7 +4300,7 @@ function pmacs.lsp.code_actions()
         rec.server, rec.uri, line, col, line, col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local acts = pmacs.code_action.actions(rec.server, rec.uri)
@@ -4363,7 +4380,7 @@ local function hover_popup(rec, quiet)
     if generation ~= popup_generation then return end
     if not ok then
       if not quiet then
-        pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+        say_await_error(rec.server, err)
       end
       return
     end
@@ -4421,7 +4438,7 @@ function pmacs.lsp.hover_doc()
       pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
     end)
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local hover = pmacs.hover.current(rec.server, rec.uri)
@@ -4480,7 +4497,7 @@ function pmacs.lsp.signature_help_at_cursor()
     popup_request_done(generation)
     if generation ~= popup_generation then return end
     if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      say_await_error(rec.server, err)
       return
     end
     local _, msg, told = pmacs.lsp._popup_signature(rec.server, rec.uri, target, false)
@@ -4846,6 +4863,7 @@ function pmacs.lsp.restart_server()
   end
   local ok, err = pcall(pmacs.lsp.restart, rec.server)
   if ok then
+    user_restarts[tostring(rec.server)] = true
     pmacs.editor.set_status("LSP: restarting " .. label)
   else
     pmacs.editor.set_status("LSP: " .. tostring(err))

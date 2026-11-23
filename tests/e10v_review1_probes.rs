@@ -595,3 +595,181 @@ fn r1_p3_a_restarted_generation_is_sent_its_document_past_what_was_sent() {
         sent_versions(&sink, "/a.rs")
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10v.4b: lsp.restart at its edges
+// ---------------------------------------------------------------------------
+
+fn named_text(s: &EditorState, name: &str) -> String {
+    let b: mlua::String = eval(
+        s,
+        &format!(
+            r#"
+            for _, id in ipairs(pmacs.buffer.list()) do
+                if pmacs.describe.buffer(id).name == {name:?} then
+                    return id:slice(0, id:len())
+                end
+            end
+            return ""
+            "#
+        ),
+    );
+    String::from_utf8_lossy(&b.as_bytes()).into_owned()
+}
+
+fn shown(msgs: &[&Value]) -> Vec<String> {
+    msgs.iter()
+        .map(|m| {
+            format!(
+                "{}{}",
+                m["method"].as_str().unwrap_or(""),
+                m["uri"]
+                    .as_str()
+                    .map(|u| format!(" {}", u.rsplit('/').next().unwrap()))
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+fn uri(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// Low 2, a witness. `M-x lsp.restart` while a hover is in flight (the
+/// fake answers no document request): the restart cancels the hover, and
+/// at `8bbb338` that cancellation wrote "server unavailable (request
+/// cancelled)" over the restart's word, where it stayed after the
+/// replacement was up. The user asked for the restart; the echo line
+/// ends on what the restart said.
+#[test]
+fn r1_p7_lsp_restart_with_a_request_in_flight_ends_on_the_restarts_word() {
+    let d = dir("inflight");
+    let a = d.join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let pids = d.join("pids.txt");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!(
+            "PMACS_FAKE_LSP_MODE = 'silent', PMACS_FAKE_LSP_PID_SINK = '{}'",
+            pids.display()
+        ),
+    );
+    open(&s, &a);
+    assert!(pump_until(&mut s, 10, initialized), "premise: initialized");
+    exec(&s, "pmacs.editor.goto_byte(3)");
+    exec(&s, "pmacs.command.invoke('lsp.hover')");
+    settle(&mut s, 300);
+    let before = status(&s);
+    exec(&s, "pmacs.command.invoke('lsp.restart')");
+    let said = status(&s);
+    let mut statuses = vec![said.clone()];
+    let replaced = pump_until(&mut s, 10, |s| {
+        let st = status(s);
+        if statuses.last() != Some(&st) {
+            statuses.push(st);
+        }
+        lines(&pids) == 2 && initialized(s)
+    });
+    settle(&mut s, 1500);
+    statuses.push(status(&s));
+    eprintln!(
+        "R1P7 before {before:?}; statuses {statuses:?}; servers {:?}",
+        servers(&s)
+    );
+    assert!(
+        replaced && said.starts_with("LSP: restarting"),
+        "premise: the server replaced and the command's word said; statuses {statuses:?}"
+    );
+    assert_eq!(
+        status(&s),
+        said,
+        "the echo line ends on the restart's word; statuses {statuses:?}"
+    );
+}
+
+/// A guard: `M-x lsp.restart` with no server for the buffer, in
+/// `*scratch*` and in a text file, says so.
+#[test]
+fn r1_p8_lsp_restart_with_no_server_says_so() {
+    let d = dir("noserver");
+    let notes = d.join("notes.txt");
+    std::fs::write(&notes, "plain\n").unwrap();
+    let s = editor_with(&d, &fake_lsp_path(), "");
+    exec(&s, "pmacs.command.invoke('lsp.restart')");
+    let scratch = status(&s);
+    open(&s, &notes);
+    exec(&s, "pmacs.command.invoke('lsp.restart')");
+    let text = status(&s);
+    eprintln!("R1P8 scratch {scratch:?}; notes.txt {text:?}");
+    assert_eq!(
+        (scratch.as_str(), text.as_str()),
+        (
+            "LSP: no server for active buffer",
+            "LSP: no server for active buffer"
+        )
+    );
+}
+
+/// A guard: `M-x lsp.restart` from the window of the second of two
+/// buffers on one server, the first holding unsaved text: the
+/// replacement receives each buffer once, with its current text.
+#[test]
+fn r1_p9_lsp_restart_from_the_second_buffer_reopens_both() {
+    let d = dir("twobufs");
+    let a = d.join("a.rs");
+    let b = d.join("b.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    std::fs::write(&b, "fn b() {}\n").unwrap();
+    let sink = d.join("messages.jsonl");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!("PMACS_FAKE_LSP_MESSAGE_SINK = '{}'", sink.display()),
+    );
+    open(&s, &a);
+    assert!(pump_until(&mut s, 10, initialized), "premise: initialized");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    exec(&s, "pmacs.editor.clipboard_set('// unsaved in a\\n')");
+    press(&mut s, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    open(&s, &b);
+    settle(&mut s, 500);
+    let a_text = named_text(&s, "a.rs");
+    exec(&s, "pmacs.command.invoke('lsp.restart')");
+    let said = status(&s);
+    let replaced = pump_until(&mut s, 10, |_| pids_in_order(&messages(&sink)).len() >= 2);
+    settle(&mut s, 1000);
+    let msgs = messages(&sink);
+    let pids = pids_in_order(&msgs);
+    assert!(
+        replaced,
+        "premise: a second process; {pids:?}; status {said:?}"
+    );
+    let second: Vec<&Value> = msgs
+        .iter()
+        .filter(|m| m["pid"].as_u64() == Some(pids[1]))
+        .collect();
+    let opens = |u: &str| -> Vec<&Value> {
+        second
+            .iter()
+            .copied()
+            .filter(|m| m["method"] == "textDocument/didOpen" && m["uri"] == u)
+            .collect()
+    };
+    eprintln!(
+        "R1P9 status {said:?}; the replacement received {:?}",
+        shown(&second)
+    );
+    let (ao, bo) = (opens(&uri(&a)), opens(&uri(&b)));
+    assert!(
+        ao.len() == 1 && bo.len() == 1,
+        "one didOpen for each; {:?}",
+        shown(&second)
+    );
+    assert!(
+        a_text.starts_with("// unsaved in a"),
+        "premise: a.rs holds unsaved text; {a_text:?}"
+    );
+    assert_eq!(ao[0]["text"].as_str(), Some(a_text.as_str()));
+}
