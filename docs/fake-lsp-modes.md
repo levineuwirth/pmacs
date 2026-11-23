@@ -17,9 +17,11 @@ here gone stale covers the shape next to the defect.
   `inlaybounds`, `inlayrefresh`, `semantictokensrefresh`,
   `applyeditplan`, `resourceops`, `posecho`, `defenv`, `wsconfig`,
   `rooturi`, `leanprogress`.
-- Failure shapes: `crash`, `crashafteranswer`, `crashonmarker`,
-  `abortonopen`, `error`, `contentmodified`, `clientfault`, `garbage`,
-  `silent`, `stopanswering`.
+- Failure shapes: `crash`, `crashafteranswer` (with
+  `PMACS_FAKE_LSP_ERROR_CODE`, its one answer an error), `crashlater`
+  (each generation's lifetime from `PMACS_FAKE_LSP_LIFETIMES_MS`),
+  `crashonmarker`, `abortonopen`, `error`, `contentmodified`,
+  `clientfault`, `garbage`, `silent`, `stopanswering`.
 - Any mode: a publish plan (`PMACS_FAKE_LSP_PUBLISH_PLAN`), a result
   plan (`PMACS_FAKE_LSP_RESULT_PLAN`, held by
   `PMACS_FAKE_LSP_RESULT_HOLD_MS`), and the capabilities and message

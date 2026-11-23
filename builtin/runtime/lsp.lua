@@ -721,9 +721,10 @@ local function note_dead_server(sid, kind, reason)
     -- E10v.2: the crash that ends the restarts, said once (this latch
     -- is per attempt, and a stopped server makes no further attempt).
     msg = string.format(
-      "LSP: %s crashed%s, %d times in a row with nothing answered between; " ..
+      "LSP: %s crashed%s, %d times in a row, each within %d s of its start; " ..
       "not restarted until its file is opened again",
-      label, reason and (": " .. tostring(reason)) or "", crashes)
+      label, reason and (": " .. tostring(reason)) or "", crashes,
+      math.floor(pmacs.lsp.crash_count_window_ms / 1000))
   elseif kind == "crashed" then
     msg = string.format("LSP: %s crashed%s", label,
       reason and (": " .. tostring(reason)) or "")
@@ -1404,7 +1405,7 @@ end
 -- E10v.2: the list row of a crashed server the restart bound holds,
 -- else nil. Held is backing off (`restart_pending`: the manager starts
 -- it again under the same id) or stopped (`crash_stopped`: it crashed
--- three times in a row with nothing served between them). A held server
+-- three times in a row, each soon after its start). A held server
 -- is not replaced under a new id by a command, which would start its
 -- count again; only a buffer opened again renews it (`attach_buffer`).
 local function held_info(sid)

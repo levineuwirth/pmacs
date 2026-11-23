@@ -10,9 +10,12 @@
 //! a bound kept per id would have been started over by a keystroke.
 //!
 //! The bound is E7i's for parse workers: a back-off doubling from one
-//! second, and after three crashes in a row with nothing served between
-//! them no restart until the file is opened again, said once. A
-//! generation that answered only `initialize` served nothing. A held
+//! second, and after three crashes in a row no restart until the file is
+//! opened again, said once. "In a row" is the owner's ruling of
+//! 2026-11-23 (E10v review 1's Low 4, option (c)): a generation that
+//! crashes within `CRASH_COUNT_WINDOW` (30 s) of its start counts toward
+//! the three whatever it answered, a handshake, a result or an error; one
+//! that lived longer starts the count, and the back-off, over. A held
 //! server, backing off or stopped, is not replaced by a command.
 //!
 //! Each row counts generations by the fake's pid sink, one line per
@@ -87,6 +90,12 @@ fn fixture(tag: &str) -> Fixture {
 
 impl Fixture {
     fn editor(&self, mode: &str) -> EditorState {
+        self.editor_env(mode, "")
+    }
+
+    /// The editor, its rust server the fake in `mode` with `extra` more
+    /// environment entries (a Lua table body, each ending in a comma).
+    fn editor_env(&self, mode: &str, extra: &str) -> EditorState {
         let s = EditorState::new_with_roots(&iso::roots());
         s.lua_host.lua().remove_app_data::<StateDir>();
         s.lua_host.lua().set_app_data(StateDir(self.dir.clone()));
@@ -95,7 +104,7 @@ impl Fixture {
             &format!(
                 "pmacs.lsp.config = {{}}\n\
                  pmacs.project.set_search_boundary({dir:?})\n\
-                 pmacs.lsp.config.rust = {{ command = '{cmd}', env = {{ \
+                 pmacs.lsp.config.rust = {{ command = '{cmd}', env = {{ {extra} \
                    PMACS_FAKE_LSP_MODE = '{mode}', PMACS_FAKE_LSP_PID_SINK = '{pids}' }} }}\n",
                 dir = self.dir.display().to_string(),
                 cmd = fake_lsp_path(),
@@ -284,37 +293,113 @@ fn e10v_2_a_command_during_the_back_off_or_after_the_stop_starts_no_server_under
     );
 }
 
-/// A server that crashes after it has served (the fake's
-/// `crashafteranswer` answers one request and exits) goes on being
-/// restarted: each crash follows an answer, so the count never passes
-/// one, and the server is restarted four times running.
+/// A server that answers a real result and then crashes at once (the
+/// fake's `crashafteranswer`: one request of the user's work answered
+/// with its result, then an exit) stops after three, as one that answers
+/// nothing does: each generation died within the window of its start, so
+/// what it answered does not end the run (the owner's ruling (c)). The
+/// rows of E10v.2 as first approved had it restarted for ever, at count
+/// one, at one second; this row stated that rule until fix round 1.
 #[test]
-fn e10v_2_a_server_that_crashes_after_serving_goes_on_being_restarted() {
+fn e10v_2_a_server_that_crashes_soon_after_serving_stops_after_three() {
     let fx = fixture("serves");
     let mut s = fx.editor("crashafteranswer");
-    for round in 1..=4 {
-        assert!(
-            pump_until(&mut s, 10, |s| servers(s)
-                .iter()
-                .any(|r| r.contains(":initialized:"))),
-            "round {round}: a generation initialized; servers {:?}",
-            servers(&s)
-        );
-        exec(&s, "pmacs.command.invoke('lsp.hover')");
-        assert!(
-            pump_until(&mut s, 10, |s| servers(s)
-                .iter()
-                .any(|r| r.contains(":crashed:"))),
-            "round {round}: the generation answered and crashed; servers {:?}",
-            servers(&s)
-        );
-        let row = servers(&s);
-        assert!(
-            row.iter().any(|r| r.contains(":crashed:1:true:false")),
-            "round {round}: a crash after an answer counts one and is restarted: {row:?}"
-        );
-    }
-    assert!(fx.generations() >= 4, "{} processes", fx.generations());
+    let mut counts = Vec::new();
+    let mut asked = 0;
+    let reached = pump_until(&mut s, 20, |s| {
+        let row = servers(s);
+        if counts.last() != Some(&row) {
+            counts.push(row.clone());
+        }
+        // A request of the user's work once each generation is up, so
+        // each one has something to answer before it crashes.
+        if row.iter().any(|r| r.contains(":initialized:")) && asked < fx.generations() {
+            asked = fx.generations();
+            exec(s, "pmacs.command.invoke('lsp.hover')");
+        }
+        stopped(s)
+    });
+    settle(&mut s, 5000);
+    assert!(
+        reached && fx.generations() == 3,
+        "a server that serves and crashes at once stops after three; stopped {reached}, \
+         {} processes; states {counts:?}",
+        fx.generations()
+    );
+    assert!(
+        counts.iter().flatten().any(|r| r.contains(":initialized:")),
+        "premise: a generation came up to answer; states {counts:?}"
+    );
+    assert_eq!(
+        errors(&s).matches(STOP_SENTENCE).count(),
+        1,
+        "the stop is said once: {:?}",
+        errors(&s)
+    );
+}
+
+/// A generation that lived past the window starts the count over: the
+/// fake's `crashlater` dies 0.3 s after its first two starts and 31 s
+/// after its third. The first two crashes count one and two; the third,
+/// past `CRASH_COUNT_WINDOW`, counts one again and is restarted after
+/// the first back-off, where a count of three would have stopped it.
+/// Each generation answers only `initialize`, so at the base of this
+/// round (`8bbb338`, "nothing answered between") the third crash is the
+/// third in a row and the server stops.
+#[test]
+fn e10v_2_a_crash_after_the_window_starts_the_count_over() {
+    let fx = fixture("window");
+    let mut s = fx.editor_env(
+        "crashlater",
+        "PMACS_FAKE_LSP_LIFETIMES_MS = '300,300,31000,300',",
+    );
+    let mut counts: Vec<Vec<String>> = Vec::new();
+    let record = |counts: &mut Vec<Vec<String>>, s: &EditorState| {
+        let row = servers(s);
+        if counts.last() != Some(&row) {
+            counts.push(row);
+        }
+    };
+    assert!(
+        pump_until(&mut s, 15, |s| {
+            record(&mut counts, s);
+            fx.generations() == 3
+        }),
+        "premise: a third generation started; states {counts:?}"
+    );
+    let third = Instant::now();
+    assert!(
+        pump_until(&mut s, 45, |s| {
+            record(&mut counts, s);
+            fx.generations() == 4 || stopped(s)
+        }),
+        "the third generation crashed and the bound decided; states {counts:?}"
+    );
+    let lived = third.elapsed();
+    assert!(
+        lived >= Duration::from_secs(30),
+        "premise: the third generation outlived the window ({lived:?}); states {counts:?}"
+    );
+    let rows: Vec<&String> = counts.iter().flatten().collect();
+    assert!(
+        !stopped(&s) && fx.generations() == 4,
+        "a crash after the window is restarted, not the third in a row; {} processes; \
+         states {counts:?}",
+        fx.generations()
+    );
+    assert!(
+        rows.iter().any(|r| r.contains(":crashed:2:")),
+        "premise: the two quick crashes counted two; states {counts:?}"
+    );
+    let after_long: Vec<&&String> = rows
+        .iter()
+        .skip_while(|r| !r.contains(":crashed:2:"))
+        .filter(|r| r.contains(":crashed:"))
+        .collect();
+    assert!(
+        after_long.iter().any(|r| r.contains(":crashed:1:true:")),
+        "the long-lived generation's crash counts one, its restart armed; states {counts:?}"
+    );
 }
 
 /// After the stop, the file opened again starts its server again: the

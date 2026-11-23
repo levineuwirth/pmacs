@@ -11006,6 +11006,11 @@ pub fn install_lsp(
     lua.set_app_data(manager.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
     let lsp_mod = lua.create_table()?;
+    // E10v.2: the restart bound's window, for the sentence that says it.
+    lsp_mod.set(
+        "crash_count_window_ms",
+        u64::try_from(crate::parse_isolation::CRASH_COUNT_WINDOW.as_millis()).unwrap_or(u64::MAX),
+    )?;
 
     {
         // T M4.5 L1: decode a server-returned `file://` URI to a

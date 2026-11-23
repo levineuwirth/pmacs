@@ -48,7 +48,18 @@
 //! * If launched with `PMACS_FAKE_LSP_MODE=crashafteranswer` (E10v.2):
 //!   an ordinary server until it has answered one request other than
 //!   `initialize`, then it exits with code 7, every generation: a server
-//!   that crashes after serving, which a restart bound keeps restarting.
+//!   that crashes soon after serving, which the restart bound stops at
+//!   three. With `PMACS_FAKE_LSP_ERROR_CODE` set (E10v fix round 1), that
+//!   one answer is a JSON-RPC error with that code (`-32603`, `-32801`)
+//!   instead of a result: a server that answers only errors and exits.
+//! * If launched with `PMACS_FAKE_LSP_MODE=crashlater` (E10v fix round
+//!   1): answers `initialize` and nothing else, as `silent`, and exits
+//!   with code 7 a planned time after it starts:
+//!   `PMACS_FAKE_LSP_LIFETIMES_MS`, a comma list of milliseconds, read by
+//!   the generation's number (its line in `PMACS_FAKE_LSP_PID_SINK`,
+//!   which this mode needs), the last value repeating. So a test has a
+//!   generation outlive the restart bound's window between two that die
+//!   at once.
 //! * If launched with `PMACS_FAKE_LSP_MODE=crashonmarker` (E10v.3): an
 //!   ordinary server until a `didOpen` or `didChange` carries the text
 //!   `PMACS-CRASH-NOW`; then, if the file `PMACS_FAKE_LSP_ABORT_ONCE`
@@ -56,10 +67,12 @@
 //!   first generation crashes when the user types the marker and the one
 //!   restarted after it serves, the marker in its documents and all.
 //! * If `PMACS_FAKE_LSP_MESSAGE_SINK` names a file (any mode, E10v.3):
-//!   appends one `{"pid", "method", "id", "uri", "text"}` JSON line per
-//!   message received, `id` null for a notification, `uri` the
-//!   `textDocument.uri` when it has one, `text` a `didOpen`'s text, so a
-//!   test reads each generation's order of documents and requests.
+//!   appends one `{"pid", "method", "id", "uri", "version", "text"}`
+//!   JSON line per message received, `id` null for a notification, `uri`
+//!   the `textDocument.uri` when it has one, `version` its
+//!   `textDocument.version` (a `didOpen`'s or a `didChange`'s), `text` a
+//!   `didOpen`'s text, so a test reads each generation's order of
+//!   documents and requests and the versions it was sent.
 //! * If `PMACS_FAKE_LSP_RESULT_PLAN` names a JSON object file (any mode,
 //!   E10v.5): a request whose method is one of its keys is answered with
 //!   that key's value as its `result`, read at each request, ahead of the
@@ -208,7 +221,9 @@
 //!   (`"textDocument/didOpen"` or `".../didChange"`, either when absent)
 //!   and whose held text contains `contains` (any text when absent). A
 //!   firing step sends its publishes in order under the notification's
-//!   URI, each with its `version` as given (none when absent or null),
+//!   URI, each with its `version` as given (none when absent or null;
+//!   the string `"received"` is the version of the notification that
+//!   fired the step, as a server publishes for the text it was sent),
 //!   so a test scripts the order a real server published in, such as
 //!   HLS 2.15.0.0's `v24:error` then `v3:[]` (#479). The plan is read
 //!   once, at the first document notification; an unreadable plan
@@ -238,6 +253,28 @@ fn main() {
             .open(&sink)
     {
         let _ = writeln!(f, "{}", std::process::id());
+    }
+    // E10v fix round 1: `crashlater` exits its generation's planned time
+    // after it starts.
+    if mode == "crashlater" {
+        let generation = std::env::var("PMACS_FAKE_LSP_PID_SINK")
+            .ok()
+            .and_then(|sink| std::fs::read_to_string(sink).ok())
+            .map_or(1, |t| t.lines().count().max(1));
+        let lifetimes: Vec<u64> = std::env::var("PMACS_FAKE_LSP_LIFETIMES_MS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        let lifetime = lifetimes
+            .get(generation - 1)
+            .or(lifetimes.last())
+            .copied()
+            .unwrap_or(0);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(lifetime));
+            std::process::exit(7);
+        });
     }
     if mode == "garbage" {
         write_garbage();
@@ -366,6 +403,26 @@ fn main() {
         //    staying alive (drives the request-timeout sweep, and
         //    makes supersede deterministic: a superseded handle can
         //    only settle via cancellation, never racing a response).
+        // E10v fix round 1: `crashafteranswer` with an error code answers
+        // its one request of the user's work with that error, then exits.
+        if mode == "crashafteranswer"
+            && let Some(idv) = &id
+            && !method.is_empty()
+            && method != "initialize"
+            && method != "shutdown"
+            && let Some(code) = std::env::var("PMACS_FAKE_LSP_ERROR_CODE")
+                .ok()
+                .and_then(|c| c.parse::<i64>().ok())
+        {
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": idv,
+                "error": { "code": code, "message": "pmacs-fake-lsp: every answer an error" }
+            });
+            write_frame(&mut stdout, &resp);
+            let _ = stdout.flush();
+            std::process::exit(7);
+        }
         if method.starts_with("textDocument/") {
             if mode == "error" && id.is_some() {
                 let resp = serde_json::json!({
@@ -401,7 +458,7 @@ fn main() {
                 write_frame(&mut stdout, &resp);
                 continue;
             }
-            if mode == "silent" {
+            if mode == "silent" || (mode == "crashlater" && id.is_some()) {
                 continue;
             }
         }
@@ -418,6 +475,7 @@ fn main() {
                 "method": method,
                 "id": id.clone().unwrap_or(serde_json::Value::Null),
                 "uri": params.pointer("/textDocument/uri").cloned().unwrap_or(serde_json::Value::Null),
+                "version": params.pointer("/textDocument/version").cloned().unwrap_or(serde_json::Value::Null),
                 "text": if method == "textDocument/didOpen" {
                     params.pointer("/textDocument/text").cloned().unwrap_or(serde_json::Value::Null)
                 } else {
@@ -1128,6 +1186,12 @@ fn main() {
                     .and_then(|t| t.get("uri"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // The version this notification carried, for a planned
+                // publish at `"received"` (E10v fix round 1).
+                let version = params
+                    .pointer("/textDocument/version")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 // The document as the server holds it after this
                 // notification: a didOpen's text; a didChange's
                 // changes applied in order to the held text, a ranged
@@ -1271,7 +1335,11 @@ fn main() {
                                         .unwrap_or_else(|| serde_json::json!([])),
                                 });
                                 if let Some(v) = p.get("version").filter(|v| !v.is_null()) {
-                                    params["version"] = v.clone();
+                                    params["version"] = if v == "received" {
+                                        version.clone()
+                                    } else {
+                                        v.clone()
+                                    };
                                 }
                                 write_frame(
                                     &mut stdout,

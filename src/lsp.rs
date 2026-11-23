@@ -820,15 +820,18 @@ pub struct LspClient {
     attempt: u32,
     /// When the manager should attempt the next restart, if any.
     next_restart_at: Option<Instant>,
-    /// E10v.2: crashes in a row with nothing served between them. A
-    /// generation that answers a request other than `initialize`
-    /// (`served`) ends the run, so its own crash counts one; a handshake
-    /// alone does not. At [`MAX_CRASHES`] an `OnCrash` or `Always`
-    /// server is not restarted again (`crash_stopped`).
+    /// E10v.2: crashes in a row, each within [`CRASH_COUNT_WINDOW`] of
+    /// its generation's start, whatever the generation answered (the
+    /// owner's ruling of 2026-11-23). A generation that lived longer
+    /// starts the run over, so its own crash counts one. At
+    /// [`MAX_CRASHES`] an `OnCrash` or `Always` server is not restarted
+    /// again (`crash_stopped`).
+    ///
+    /// [`CRASH_COUNT_WINDOW`]: crate::parse_isolation::CRASH_COUNT_WINDOW
+    /// [`MAX_CRASHES`]: crate::parse_isolation::MAX_CRASHES
     crashes: u32,
-    /// Whether the current generation has answered a request other than
-    /// `initialize` or `shutdown`, with a result or an error.
-    served: bool,
+    /// When the current generation's process was started.
+    started_at: Option<Instant>,
     /// E10v.4b: the user asked for a restart (`lsp.restart`); the exit
     /// that follows is not a crash, and the next generation starts at once
     /// with its crash count new.
@@ -868,7 +871,7 @@ impl LspClient {
             attempt: 0,
             next_restart_at: None,
             crashes: 0,
-            served: false,
+            started_at: None,
             restart_requested: false,
             cancelled_rids: HashSet::new(),
             deferred_notifications: Vec::new(),
@@ -1608,7 +1611,7 @@ impl LspManager {
     fn start_generation(&mut self, id: LspServerId, client: &mut LspClient) -> Result<(), String> {
         client.attempt += 1;
         client.next_restart_at = None;
-        client.served = false;
+        client.started_at = Some(Instant::now());
         client.stdout = FrameParser::new();
         client.pending.clear();
         // T M4.5 task #7: the new generation has a fresh request-id
@@ -2878,17 +2881,21 @@ impl LspManager {
             // new; the exit it ends is not a crash.
             if client.restart_requested {
                 client.crashes = 0;
-                client.served = false;
                 client.next_restart_at = Some(at);
             }
-            // E10v.2: a crash after a generation served starts a new run.
+            // E10v.2: a crash within `CRASH_COUNT_WINDOW` of its
+            // generation's start adds to the run, whatever it answered; a
+            // generation that lived longer starts the run over.
             if !was_shutdown {
-                client.crashes = if client.served {
-                    1
-                } else {
+                let short = client.started_at.is_none_or(|started| {
+                    at.saturating_duration_since(started)
+                        < crate::parse_isolation::CRASH_COUNT_WINDOW
+                });
+                client.crashes = if short {
                     client.crashes.saturating_add(1)
+                } else {
+                    1
                 };
-                client.served = false;
             }
             (
                 was_shutdown,
@@ -3037,17 +3044,6 @@ impl LspManager {
         }
     }
 
-    /// E10v.2: an answer to a request of the user's work, a result or
-    /// an error, is something between two crashes; the handshake is not.
-    fn note_served(&mut self, sid: LspServerId, method: &str) {
-        if method != "initialize"
-            && method != "shutdown"
-            && let Some(client) = self.clients.get_mut(&sid)
-        {
-            client.served = true;
-        }
-    }
-
     fn handle_response(
         &mut self,
         sid: LspServerId,
@@ -3090,7 +3086,6 @@ impl LspManager {
             );
             return;
         }
-        self.note_served(sid, &method);
         // Special-case lifecycle responses: initialize and shutdown.
         if method == "initialize" {
             let result_val = result.clone().unwrap_or(Value::Null);
@@ -3687,7 +3682,7 @@ impl LspManager {
                 reason: reason.clone(),
                 ended: now,
             };
-            // E10v.2: a generation that could not start served nothing.
+            // E10v.2: a generation that could not start lived no time.
             client.crashes = client.crashes.saturating_add(1);
             client.next_restart_at = if should_restart(client.spec.restart)
                 && client.crashes < crate::parse_isolation::MAX_CRASHES
@@ -3794,7 +3789,8 @@ impl LspManager {
         Ok(())
     }
 
-    /// E10v.2: crashes in a row with nothing served between them.
+    /// E10v.2: crashes in a row, each within
+    /// [`crate::parse_isolation::CRASH_COUNT_WINDOW`] of its start.
     #[must_use]
     pub fn crashes(&self, sid: LspServerId) -> Option<u32> {
         self.clients.get(&sid).map(|c| c.crashes)
@@ -3810,11 +3806,12 @@ impl LspManager {
     }
 
     /// E10v.2: a crashed server its restart policy would restart, not
-    /// restarted because it crashed [`MAX_CRASHES`] times in a row with
-    /// nothing served between them. It stays so until the editor
+    /// restarted because it crashed [`MAX_CRASHES`] times in a row, each
+    /// within [`CRASH_COUNT_WINDOW`] of its start. It stays so until the editor
     /// replaces it for a buffer opened again (`builtin/runtime/lsp.lua`).
     ///
     /// [`MAX_CRASHES`]: crate::parse_isolation::MAX_CRASHES
+    /// [`CRASH_COUNT_WINDOW`]: crate::parse_isolation::CRASH_COUNT_WINDOW
     #[must_use]
     pub fn crash_stopped(&self, sid: LspServerId) -> bool {
         self.clients.get(&sid).is_some_and(|c| {
