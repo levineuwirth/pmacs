@@ -680,6 +680,7 @@ fn byte_to_position(text: &str, byte: usize, enc: PositionEncoding) -> (u32, u32
 /// `TextEdit`s, diagnostics, hover ranges all nest `Position`s and
 /// are converted uniformly. UTF-8 is a no-op fast path (the offsets
 /// already match), so the recursion is skipped entirely there.
+#[cfg(test)] // E10v.5: production converts by document (`rewrite_positions_by_document`)
 fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncoding) {
     if enc == PositionEncoding::Utf8 {
         return;
@@ -703,6 +704,79 @@ fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncodin
         Value::Array(arr) => {
             for v in arr.iter_mut() {
                 rewrite_positions_to_bytes(v, doc, enc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// E10v.5 (#533): as [`rewrite_positions_to_bytes`], each `Position`
+/// converted against the document it belongs to rather than against one
+/// document for the whole answer. A position's document is named by the
+/// nearest object above it that names one: a `uri` (a `Location`, a
+/// resource op, a `WorkspaceSymbol`'s location), a `targetUri` (a
+/// `LocationLink`, whose `originSelectionRange` stays in `default`, the
+/// requesting document), a `textDocument.uri` (a `TextDocumentEdit`), or a
+/// key of a `WorkspaceEdit`'s `changes`. A position under none of them is
+/// in `default`. `text_of` gives a document's text, `None` when it cannot
+/// be read, and a position whose document has no text or no such line is
+/// left as it came.
+fn rewrite_positions_by_document(
+    value: &mut Value,
+    doc: Option<&std::sync::Arc<str>>,
+    default: Option<&std::sync::Arc<str>>,
+    enc: PositionEncoding,
+    text_of: &mut dyn FnMut(&str) -> Option<std::sync::Arc<str>>,
+) {
+    match value {
+        Value::Object(map) => {
+            let named = map
+                .get("uri")
+                .or_else(|| map.get("targetUri"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    map.get("textDocument")
+                        .and_then(|d| d.get("uri"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned);
+            let own = named.as_deref().map(&mut *text_of);
+            let here = match &own {
+                Some(text) => text.as_ref(),
+                None => doc,
+            };
+            if let (Some(line), Some(character)) = (
+                map.get("line").and_then(Value::as_u64),
+                map.get("character").and_then(Value::as_u64),
+            ) && let Some(line_text) = here.and_then(|d| nth_line(d, line as u32))
+            {
+                let byte = char_to_byte(line_text, character as u32, enc);
+                map.insert("character".into(), Value::from(byte));
+            }
+            for (key, v) in map.iter_mut() {
+                match (key.as_str(), v) {
+                    ("changes", Value::Object(by_uri)) => {
+                        for (u, edits) in by_uri.iter_mut() {
+                            let text = text_of(u);
+                            rewrite_positions_by_document(
+                                edits,
+                                text.as_ref(),
+                                default,
+                                enc,
+                                text_of,
+                            );
+                        }
+                    }
+                    ("originSelectionRange", v) => {
+                        rewrite_positions_by_document(v, default, default, enc, text_of);
+                    }
+                    (_, v) => rewrite_positions_by_document(v, here, default, enc, text_of),
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                rewrite_positions_by_document(v, doc, default, enc, text_of);
             }
         }
         _ => {}
@@ -1745,12 +1819,47 @@ impl LspManager {
     /// `character` is a pmacs byte offset. No cached document (or the
     /// UTF-8 fast path) ⇒ returned unchanged.
     fn inbound_converted(&self, sid: LspServerId, uri: &str, value: &Value) -> Value {
-        let enc = self.position_encoding(sid);
         let mut owned = value.clone();
-        if let Some(doc) = self.documents.get(&(sid, uri.to_owned())) {
-            rewrite_positions_to_bytes(&mut owned, doc, enc);
-        }
+        self.convert_positions_by_document(sid, uri, &mut owned);
         owned
+    }
+
+    /// E10v.5 (#533): every `Position` in `value` from the server's
+    /// encoding to a byte column of its own document's line
+    /// ([`rewrite_positions_by_document`]), `uri` the requesting document
+    /// (empty for `workspace/symbol`, which names none). A document's text
+    /// is the one this server holds for it, the text its positions count
+    /// in, else the file as it is on disk (a file the server read for
+    /// itself, open in no buffer of its); each is read once per answer. A
+    /// UTF-8 server's columns are bytes already, and nothing is read.
+    pub(crate) fn convert_positions_by_document(
+        &self,
+        sid: LspServerId,
+        uri: &str,
+        value: &mut Value,
+    ) {
+        let enc = self.position_encoding(sid);
+        if enc == PositionEncoding::Utf8 {
+            return;
+        }
+        let mut cache: HashMap<String, Option<std::sync::Arc<str>>> = HashMap::new();
+        let mut text_of = |u: &str| -> Option<std::sync::Arc<str>> {
+            cache
+                .entry(u.to_owned())
+                .or_insert_with(|| {
+                    self.documents
+                        .get(&(sid, u.to_owned()))
+                        .cloned()
+                        .or_else(|| {
+                            crate::project_index::uri_to_path(u)
+                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                .map(|t| std::sync::Arc::from(t.as_str()))
+                        })
+                })
+                .clone()
+        };
+        let default = if uri.is_empty() { None } else { text_of(uri) };
+        rewrite_positions_by_document(value, default.as_ref(), default.as_ref(), enc, &mut text_of);
     }
 
     /// Register an async-runtime awaiter for the just-sent request

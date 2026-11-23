@@ -2141,7 +2141,15 @@ local function move_active_cursor_to(line, col)
     pmacs.editor.move_up()
   end
   for _ = 1, line do pmacs.editor.move_down() end
-  for _ = 1, col do pmacs.editor.move_right() end
+  -- E10v.5: `col` is a byte column (the manager converted it from the
+  -- server's encoding), so it is placed as one, not walked as that many
+  -- characters, which put the caret past every multi-byte character
+  -- before it; clamped to the line's end, as LSP clamps a column.
+  pmacs.editor.move_line_start()
+  local start = pmacs.editor.cursor()
+  pmacs.editor.move_line_end()
+  local stop = pmacs.editor.cursor()
+  pmacs.editor.goto_byte(start + math.min(col, stop - start))
 end
 
 -- Compute the byte offset of (line, col) within `text` where lines are
@@ -3424,7 +3432,9 @@ local function handle_server_requests()
             -- nothing and makes the boundary uniform regardless of
             -- which call fails.
             local ok, a, b, c, d = pcall(function()
-              local parsed = pmacs.lsp._parse_workspace_edit(edit)
+              -- E10v.5 (#533): with the server, so its columns are
+              -- converted from its encoding, each against its own file.
+              local parsed = pmacs.lsp._parse_workspace_edit(edit, sid)
               return apply_workspace_edit(parsed.ops)
             end)
             if not ok then

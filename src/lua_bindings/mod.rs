@@ -11652,10 +11652,19 @@ pub fn install_lsp(
         // `{ ops = { … } }` ordered-op shape the rename/code-action
         // surfaces hand back — so the Lua applier has exactly one
         // input format regardless of origin.
+        let m = manager.clone();
         lsp_mod.set(
             "_parse_workspace_edit",
-            lua.create_function(move |lua, edit: Value| {
-                let json = lua_to_json(edit)?;
+            lua.create_function(move |lua, (edit, sid): (Value, Option<LspServerIdLua>)| {
+                let mut json = lua_to_json(edit)?;
+                // E10v.5 (#533): a server's own `workspace/applyEdit`
+                // reaches Lua as the server wrote it, its columns in the
+                // server's encoding; given the server, they are converted
+                // here, each against its own document, as an answer's are.
+                if let Some(sid) = sid {
+                    m.borrow()
+                        .convert_positions_by_document(sid.0, "", &mut json);
+                }
                 let parsed = WorkspaceEditResponse::from_lsp_value(&json);
                 let out = lua.create_table_with_capacity(0, 1)?;
                 out.set("ops", workspace_ops_to_lua(lua, &parsed)?)?;

@@ -9461,7 +9461,7 @@ fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
                if _G._n > 0 then
                  _G._line = locs[1].line
                  _G._col  = locs[1].col
-                 _G._uri  = locs[1].uri
+                 _G._uri  = locs[2] and locs[2].uri
                end
                _G._done=true
              end)",
@@ -9478,7 +9478,10 @@ fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
         .load("return _G._n, (_G._line or -1), (_G._col or -1), (_G._uri or '')")
         .eval()
         .expect("read definition result");
-    assert_eq!(n, 1, "exactly one definition location");
+    // E10v.5: the fake answers the echo under the request's own document
+    // and the `pos:N` stamp in a second location's `uri`, since a position
+    // is converted against the document its location names.
+    assert_eq!(n, 2, "the echoed location and the stamp");
     assert_eq!(line, 0, "line is encoding-invariant");
     assert_eq!(
         uri, "pos:2",

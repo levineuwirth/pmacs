@@ -60,6 +60,12 @@
 //!   message received, `id` null for a notification, `uri` the
 //!   `textDocument.uri` when it has one, `text` a `didOpen`'s text, so a
 //!   test reads each generation's order of documents and requests.
+//! * If `PMACS_FAKE_LSP_RESULT_PLAN` names a JSON object file (any mode,
+//!   E10v.5): a request whose method is one of its keys is answered with
+//!   that key's value as its `result`, read at each request, ahead of the
+//!   mode's own answer; so a test writes the locations a definition,
+//!   references or `workspace/symbol` answer names, in another file, in
+//!   this server's UTF-16 columns.
 //! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
 //!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
 //!   models the crash #299's quit met and its report, not its trigger:
@@ -404,6 +410,19 @@ fn main() {
                 },
             });
             let _ = writeln!(f, "{line}");
+        }
+        // E10v.5: a planned result for this method.
+        if let (Some(idv), Ok(path)) = (&id, std::env::var("PMACS_FAKE_LSP_RESULT_PLAN"))
+            && let Some(result) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|plan| plan.get(method.as_str()).cloned())
+        {
+            write_frame(
+                &mut stdout,
+                &serde_json::json!({ "jsonrpc": "2.0", "id": idv, "result": result }),
+            );
+            continue;
         }
         match (method.as_str(), id) {
             ("initialize", Some(idv)) => {
@@ -1331,10 +1350,25 @@ fn main() {
                         }),
                     )
                 };
+                // `posecho` (E10v.5): the echoed range under the request's
+                // own document, whose text it is converted against, and the
+                // `pos:N` stamp in a second location's `uri`, since a
+                // position is converted against the document its location
+                // names and `pos:N` names none.
+                let result = if mode == "posecho" {
+                    let own = params
+                        .get("textDocument")
+                        .and_then(|t| t.get("uri"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    serde_json::json!([{ "uri": own, "range": range }, { "uri": uri, "range": range }])
+                } else {
+                    serde_json::json!([{ "uri": uri, "range": range }])
+                };
                 let resp = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": idv,
-                    "result": [{ "uri": uri, "range": range }]
+                    "result": result
                 });
                 write_frame(&mut stdout, &resp);
             }

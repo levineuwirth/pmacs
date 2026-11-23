@@ -257,10 +257,10 @@ impl Fixture {
 
     /// The Lua that points the rust server at the fake carrying the
     /// plan, as an `init.lua` or a daemon's init holds it. The fake
-    /// negotiates UTF-8 columns, as rust-analyzer does: under UTF-16 an
-    /// edit in a file other than the one a request names has its
-    /// columns converted against the wrong document, which is its own
-    /// defect and not this suite's subject.
+    /// negotiates no encoding, so its columns are the spec's UTF-16:
+    /// until E10v.5 an edit in a file other than the one a request
+    /// named was converted against the wrong document (#533), and this
+    /// suite set UTF-8 to step around it.
     fn server_config(&self) -> String {
         format!(
             "pmacs.lsp.config = {{}}\n\
@@ -268,7 +268,6 @@ impl Fixture {
                command = '{}',\n\
                env = {{\n\
                  PMACS_FAKE_LSP_MODE = 'applyeditplan',\n\
-                 PMACS_FAKE_LSP_POSITION_ENCODING = 'utf-8',\n\
                  PMACS_FAKE_LSP_EDIT_PLAN = '{}',\n\
                  PMACS_FAKE_LSP_APPLYEDIT_SINK = '{}',\n\
                }},\n\
@@ -481,11 +480,13 @@ fn e10a_3_a_code_actions_edit_keeps_the_place() {
         status(&s),
         &buffer_text(&s)[..12]
     );
-    // The fake's edit is three bytes from column 3 of line 0, which
-    // takes that line's end with it: `// 0` and `// 1` become one line,
-    // `// ED1/ 1`. The caret is on the same text, a line up, and on the
-    // same row of the window.
-    assert_eq!(place(&s), ("a.rs".to_owned(), 40, 22, 29));
+    // The fake's edit is columns 3 to 6 of line 0, `// 0`, whose end is
+    // column 4: LSP clamps a column past a line's end to the end, so it
+    // replaces the `0` and keeps the line (`// ED1`). Under UTF-8 the
+    // client once read the column as a byte and took the newline with
+    // it; since E10v.5 the suite runs on the spec's UTF-16, which
+    // clamps. The caret is on the same text and the same row.
+    assert_eq!(place(&s), ("a.rs".to_owned(), 41, 22, 30));
 }
 
 /// A server's own `workspace/applyEdit`, which the first code action's
