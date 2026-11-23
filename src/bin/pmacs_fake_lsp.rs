@@ -65,7 +65,8 @@
 //!   that key's value as its `result`, read at each request, ahead of the
 //!   mode's own answer; so a test writes the locations a definition,
 //!   references or `workspace/symbol` answer names, in another file, in
-//!   this server's UTF-16 columns.
+//!   this server's UTF-16 columns. `PMACS_FAKE_LSP_RESULT_HOLD_MS` holds
+//!   each planned answer that many milliseconds (E10v.6).
 //! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
 //!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
 //!   models the crash #299's quit met and its report, not its trigger:
@@ -418,6 +419,14 @@ fn main() {
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
                 .and_then(|plan| plan.get(method.as_str()).cloned())
         {
+            // E10v.6: `PMACS_FAKE_LSP_RESULT_HOLD_MS` holds a planned
+            // answer, so the user can switch buffers before it lands.
+            if let Some(ms) = std::env::var("PMACS_FAKE_LSP_RESULT_HOLD_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             write_frame(
                 &mut stdout,
                 &serde_json::json!({ "jsonrpc": "2.0", "id": idv, "result": result }),

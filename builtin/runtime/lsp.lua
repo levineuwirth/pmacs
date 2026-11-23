@@ -773,6 +773,16 @@ local function buffer_text(buf)
   return buf:slice(0, buf:len())
 end
 
+-- E10v.6: whether `buf` is still a buffer of the editor (not killed).
+local function buffer_alive(buf)
+  if not buf then return false end
+  local key = tostring(buf)
+  for _, b in ipairs(pmacs.buffer.list()) do
+    if tostring(b) == key then return true end
+  end
+  return false
+end
+
 -- didChange coalescing (typing perf) -----------------------------------------
 --
 -- A `textDocument/didChange` carries the edits since the last one as
@@ -2189,10 +2199,38 @@ local function carried_caret(pos, resolved)
   return at + shift
 end
 
-local function apply_text_edits(edits)
+-- E10v.6 (#535): `target`, when given, is the buffer the edits were
+-- asked for. Shown in the window, it is edited there and the caret
+-- carried as below; not shown, it is edited where it is and no window's
+-- caret or view moves. Without it the edits are the shown buffer's, as a
+-- workspace edit's are once `find_or_open` has shown the file.
+local function apply_text_edits(edits, target)
   if not edits or #edits == 0 then return 0 end
-  local buf = pmacs.window.buffer()
+  local shown = pmacs.window.buffer()
+  local buf = target or shown
   if not buf then return 0 end
+  if not shown or tostring(buf) ~= tostring(shown) then
+    local text = buffer_text(buf)
+    local resolved = {}
+    for _, e in ipairs(edits) do
+      table.insert(resolved, {
+        start = byte_offset_for(text, e.start_line, e.start_col),
+        stop  = byte_offset_for(text, e.end_line, e.end_col),
+        text  = e.new_text,
+      })
+    end
+    table.sort(resolved, function(a, b) return a.start > b.start end)
+    for _, e in ipairs(resolved) do
+      if e.start == e.stop then
+        buf:insert(e.start, e.text)
+      elseif e.text == "" then
+        buf:delete(e.start, e.stop)
+      else
+        buf:replace(e.start, e.stop, e.text)
+      end
+    end
+    return #resolved
+  end
   local text = active_buffer_text()
   -- E10a.3: the caret of the window these edits are made in, and the
   -- row of that window it is on. A buffer edit moves no window's caret
@@ -3590,7 +3628,20 @@ function pmacs.lsp.go_to_definition()
       return
     end
     local first = locs[1]
-    if first.uri == rec.uri then
+    -- E10v.6: the answer is the requested buffer's. Asked in one buffer
+    -- and answered once the window shows another, the same-file branch
+    -- moved the other's caret; it goes through the cross-file branch
+    -- instead, which shows the requested buffer, and a buffer killed
+    -- meanwhile has nothing to receive it.
+    local shown = pmacs.window.buffer()
+    local same_shown = first.uri == rec.uri and shown ~= nil
+      and tostring(shown) == tostring(rec.buffer)
+    if first.uri == rec.uri and not same_shown and not buffer_alive(rec.buffer) then
+      pmacs.editor.set_status(
+        "LSP: the definition was dropped: its buffer was closed before the answer")
+      return
+    end
+    if same_shown then
       -- Same file: record the origin so M-, returns here, then move.
       pmacs.editor.push_jump()
       move_active_cursor_to(first.line, first.col)
@@ -3993,6 +4044,11 @@ function pmacs.lsp.format_buffer()
     return
   end
   pmacs.formatting.clear(rec.server, rec.uri)
+  -- E10v.6 (#535): the answer belongs to this buffer, shown or not when it
+  -- lands; a buffer killed meanwhile (the same file opened again is
+  -- another buffer) has nothing to receive it.
+  local buf = rec.buffer
+  local name = pmacs.describe.buffer(buf).name
   pmacs.async(function()
     local ok, err = pcall(function()
       pmacs.lsp.request_formatting(rec.server, rec.uri, 4, true):await()
@@ -4006,7 +4062,12 @@ function pmacs.lsp.format_buffer()
       pmacs.editor.set_status("LSP: no formatting edits")
       return
     end
-    local n = apply_text_edits(edits)
+    if not buffer_alive(buf) then
+      pmacs.editor.set_status(string.format(
+        "LSP: the format of %s was dropped: its buffer was closed before the answer", name))
+      return
+    end
+    local n = apply_text_edits(edits, buf)
     pmacs.editor.set_status(string.format("LSP: applied %d edits", n))
   end)
 end
