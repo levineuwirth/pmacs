@@ -2866,11 +2866,9 @@ mod tests {
         .unwrap();
         b.edit_group_end();
         b.undo().expect("undo");
-        assert_eq!(
-            rope_string(&b),
-            "one two three",
-            "one undo takes both edits"
-        );
+        let mut text = vec![0u8; usize::try_from(b.len()).unwrap()];
+        b.snapshot_rope().slice(0, b.len(), &mut text);
+        assert_eq!(text, b"one two three", "one undo takes both edits");
         assert_eq!(b.take_undone_place(), Some(place));
     }
     use crate::view::View;
