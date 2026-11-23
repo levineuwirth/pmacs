@@ -49,6 +49,17 @@
 //!   an ordinary server until it has answered one request other than
 //!   `initialize`, then it exits with code 7, every generation: a server
 //!   that crashes after serving, which a restart bound keeps restarting.
+//! * If launched with `PMACS_FAKE_LSP_MODE=crashonmarker` (E10v.3): an
+//!   ordinary server until a `didOpen` or `didChange` carries the text
+//!   `PMACS-CRASH-NOW`; then, if the file `PMACS_FAKE_LSP_ABORT_ONCE`
+//!   names does not exist, it creates it and exits with code 7. So the
+//!   first generation crashes when the user types the marker and the one
+//!   restarted after it serves, the marker in its documents and all.
+//! * If `PMACS_FAKE_LSP_MESSAGE_SINK` names a file (any mode, E10v.3):
+//!   appends one `{"pid", "method", "id", "uri", "text"}` JSON line per
+//!   message received, `id` null for a notification, `uri` the
+//!   `textDocument.uri` when it has one, `text` a `didOpen`'s text, so a
+//!   test reads each generation's order of documents and requests.
 //! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
 //!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
 //!   models the crash #299's quit met and its report, not its trigger:
@@ -278,6 +289,17 @@ fn main() {
             let _ = std::fs::write(&once, std::process::id().to_string());
             std::process::abort();
         }
+        // E10v.3: `crashonmarker`, once, on the user's marker, before the
+        // message sink below records the notification that carried it.
+        if mode == "crashonmarker"
+            && (method == "textDocument/didOpen" || method == "textDocument/didChange")
+            && params.to_string().contains("PMACS-CRASH-NOW")
+            && let Ok(once) = std::env::var("PMACS_FAKE_LSP_ABORT_ONCE")
+            && !std::path::Path::new(&once).exists()
+        {
+            let _ = std::fs::write(&once, std::process::id().to_string());
+            std::process::exit(7);
+        }
         if mode == "stopanswering" && carries_stop_command(&method, &params) {
             if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_STOP_SINK") {
                 let _ = std::fs::write(&sink, "stopped");
@@ -363,6 +385,26 @@ fn main() {
             }
         }
         let had_id = id.is_some();
+        // E10v.3: every message, in the order received.
+        if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_MESSAGE_SINK")
+            && let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&sink)
+        {
+            let line = serde_json::json!({
+                "pid": std::process::id(),
+                "method": method,
+                "id": id.clone().unwrap_or(serde_json::Value::Null),
+                "uri": params.pointer("/textDocument/uri").cloned().unwrap_or(serde_json::Value::Null),
+                "text": if method == "textDocument/didOpen" {
+                    params.pointer("/textDocument/text").cloned().unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::Null
+                },
+            });
+            let _ = writeln!(f, "{line}");
+        }
         match (method.as_str(), id) {
             ("initialize", Some(idv)) => {
                 let mut resp = serde_json::json!({

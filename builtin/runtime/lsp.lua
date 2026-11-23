@@ -2502,6 +2502,35 @@ end
 -- `sid`. Fire-and-forget: the response absorbs into its store via the
 -- request's route, exactly like the explicit command path — no await
 -- needed. `request_fn(sid, uri)` issues the re-pull.
+-- E10v.3 (#355): a restarted generation is sent every document attached
+-- to its server, with each buffer's current text, unsaved edits and all.
+-- `start_generation` dropped the dead generation's documents and
+-- `attach_buffer` returns a live server's attachment as it is, so nothing
+-- else sends them. Called on the `restarting` event, while the new process
+-- is starting: the manager holds each `didOpen` and replays it right after
+-- `initialized`, before it will send any request, so no request about a
+-- document reaches the new server ahead of the document. A killed buffer's
+-- record (nothing detaches one at a kill) reads no text and is skipped.
+-- Whether to reopen into a server the document crashed is the restart
+-- bound's answer: it is, and three crashes in a row stop it (E10v.2).
+local function reopen_attachments(sid)
+  for key, rec in pairs(attachments) do
+    if rec.server == sid and rec.uri then
+      local ok_t, text = pcall(buffer_text, rec.buffer)
+      if ok_t and type(text) == "string" then
+        -- The didOpen carries the whole text; changes not yet sent are in it.
+        pending_did_change[key] = nil
+        rec.version = 1
+        pcall(pmacs.lsp.did_open, sid, rec.uri, rec.version, text)
+        local ok_mod, modified = pcall(function() return rec.buffer:is_modified() end)
+        if ok_mod and modified then
+          pcall(pmacs.lsp._document_off_disk, sid, rec.uri)
+        end
+      end
+    end
+  end
+end
+
 local function repull_for_attachments(sid, request_fn)
   for _, rec in pairs(attachments) do
     if rec.server == sid and rec.uri then
@@ -3477,6 +3506,8 @@ local function handle_server_requests()
           -- not a handler is still waiting for this answer.
           pcall(report_client_error, sid, ev)
           deliver_response(sid, ev)
+        elseif ev.kind == "restarting" then
+          reopen_attachments(sid)
         elseif ev.kind == "crashed" then
           -- E5.3: a crash was consumed silently here; it is reported
           -- through `pmacs.error`, marks the modeline `LSP:!` for every
