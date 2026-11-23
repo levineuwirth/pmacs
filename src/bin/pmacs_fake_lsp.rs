@@ -173,6 +173,22 @@
 //!   does; unset, a mode's own choice or the spec's UTF-16 (E10a.3).
 //! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
 //!   `initializationOptions` the client sent, as JSON (E7c.2).
+//! * If `PMACS_FAKE_LSP_CAPABILITIES_SINK` names a file (any mode): the
+//!   `capabilities` the client sent in `initialize`, as JSON (E10v.1).
+//! * If `PMACS_FAKE_LSP_PUBLISH_PLAN` names a JSON file (any mode but
+//!   `didsave`, E10v.1): the diagnostics this server publishes are that
+//!   plan's, not the synthetic pair. The plan is an array of steps, each
+//!   `{"method"?, "contains"?, "publish": [{"version"?, "diagnostics"},
+//!   ...]}`; the steps fire in order, each once, on the first `didOpen`
+//!   or `didChange` after the step before that matches its `method`
+//!   (`"textDocument/didOpen"` or `".../didChange"`, either when absent)
+//!   and whose held text contains `contains` (any text when absent). A
+//!   firing step sends its publishes in order under the notification's
+//!   URI, each with its `version` as given (none when absent or null),
+//!   so a test scripts the order a real server published in, such as
+//!   HLS 2.15.0.0's `v24:error` then `v3:[]` (#479). The plan is read
+//!   once, at the first document notification; an unreadable plan
+//!   publishes nothing.
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
 //!   one `{"method", "text", "ranged"}` JSON line per received didOpen
 //!   / didChange --- `text` the document as the server holds it after
@@ -218,6 +234,10 @@ fn main() {
     let mut native_diagnostics: Vec<serde_json::Value> = Vec::new();
     // `fullonly` observability: counts /full responses (rid-1, rid-2…).
     let mut full_count: u32 = 0;
+    // E10v.1: the publish plan's steps, read at the first document
+    // notification, and how many have fired.
+    let mut publish_plan: Option<Vec<serde_json::Value>> = None;
+    let mut publish_fired: usize = 0;
     loop {
         let body = match read_frame(&mut stdin) {
             Ok(Some(b)) => b,
@@ -484,6 +504,15 @@ fn main() {
                 if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_INIT_SINK") {
                     let recorded = params
                         .get("initializationOptions")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let _ = std::fs::write(&sink, recorded.to_string());
+                }
+                // E10v.1: the client capabilities, so a test can read
+                // what the client advertised (`versionSupport`).
+                if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_CAPABILITIES_SINK") {
+                    let recorded = params
+                        .get("capabilities")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
                     let _ = std::fs::write(&sink, recorded.to_string());
@@ -1121,12 +1150,59 @@ fn main() {
                     });
                     write_frame(&mut stdout, &progress);
                 }
+                // E10v.1: a publish plan replaces the synthetic pair.
+                let plan_path = std::env::var("PMACS_FAKE_LSP_PUBLISH_PLAN").ok();
+                if let (Some(path), true) = (&plan_path, uri.is_string() && mode != "didsave") {
+                    let steps = publish_plan.get_or_insert_with(|| {
+                        std::fs::read_to_string(path)
+                            .ok()
+                            .and_then(|t| serde_json::from_str::<Vec<serde_json::Value>>(&t).ok())
+                            .unwrap_or_default()
+                    });
+                    if let Some(step) = steps.get(publish_fired) {
+                        let method_ok = step
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|m| m == method);
+                        let text_ok = step
+                            .get("contains")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|c| text.as_deref().is_some_and(|t| t.contains(c)));
+                        if method_ok && text_ok {
+                            publish_fired += 1;
+                            let publishes = step
+                                .get("publish")
+                                .and_then(serde_json::Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+                            for p in publishes {
+                                let mut params = serde_json::json!({
+                                    "uri": uri,
+                                    "diagnostics": p.get("diagnostics").cloned()
+                                        .unwrap_or_else(|| serde_json::json!([])),
+                                });
+                                if let Some(v) = p.get("version").filter(|v| !v.is_null()) {
+                                    params["version"] = v.clone();
+                                }
+                                write_frame(
+                                    &mut stdout,
+                                    &serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "method": "textDocument/publishDiagnostics",
+                                        "params": params,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
                 // Also push a synthetic `publishDiagnostics`
                 // notification with two entries (one Error, one
                 // Warning) so M4.6 tests can exercise the store ---
                 // except in `didsave`, whose two marker sets are the
-                // whole of what it publishes (E7c.3).
-                if uri.is_string() && mode != "didsave" {
+                // whole of what it publishes (E7c.3), and under a
+                // publish plan (E10v.1).
+                if uri.is_string() && mode != "didsave" && plan_path.is_none() {
                     let diags = serde_json::json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/publishDiagnostics",

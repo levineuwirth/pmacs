@@ -945,6 +945,14 @@ pub struct LspManager {
     /// resurrect an evicted key, which is the whole failure this gate
     /// exists to stop.
     forgotten_documents: std::collections::HashSet<(LspServerId, String)>,
+    /// E10v.1 (#479): the highest `version` a `publishDiagnostics` has
+    /// carried for each `(server, uri)`. A publish below it was computed
+    /// for text older than one the server has already reported on, and
+    /// is dropped; one at it replaces; one with no version takes effect
+    /// and leaves this as it was. Reset at `did_open`, and dropped with
+    /// the documents wherever a generation's documents go, since a new
+    /// process numbers nothing it has not been sent.
+    published_versions: HashMap<(LspServerId, String), i64>,
     /// T M4.9: `(project_root, language_id)` → server id. Drives the
     /// "LSP runs per-project, not per-buffer" invariant. Roots are
     /// stored as [`PathBuf`] so callers don't have to canonicalise
@@ -1216,6 +1224,7 @@ impl LspManager {
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             forgotten_documents: std::collections::HashSet::new(),
+            published_versions: HashMap::new(),
             project_servers: HashMap::new(),
         }
     }
@@ -1530,6 +1539,7 @@ impl LspManager {
         // new `did_open` from the editor's reattach path.
         self.documents.retain(|(s, _), _| *s != id);
         self.disk_documents.retain(|(s, _), _| *s != id);
+        self.published_versions.retain(|(s, _), _| *s != id);
         // dired Stage 2a §5 — the tombstone is generation-scoped: this
         // generation's forgotten pairs go, every other server's stay.
         // The reattach path re-`did_open`s whatever it still holds.
@@ -2747,6 +2757,7 @@ impl LspManager {
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
         self.disk_documents.retain(|(s, _), _| *s != sid);
+        self.published_versions.retain(|(s, _), _| *s != sid);
         if was_shutdown {
             self.push_event(sid, at, LspEventKind::Stopped);
         } else {
@@ -3365,7 +3376,7 @@ impl LspManager {
     /// update [`Self::diag_store`]. Malformed payloads (missing uri
     /// or non-array diagnostics) are ignored --- they're a
     /// server-side bug, not a fatal protocol error.
-    fn absorb_publish_diagnostics(&self, sid: LspServerId, params: &Value) {
+    fn absorb_publish_diagnostics(&mut self, sid: LspServerId, params: &Value) {
         let Some(uri) = params.get("uri").and_then(Value::as_str).map(str::to_owned) else {
             return;
         };
@@ -3384,6 +3395,25 @@ impl LspManager {
         let Some(arr) = params.get("diagnostics").and_then(Value::as_array) else {
             return;
         };
+        // E10v.1 (#479): a publish below the highest version this server
+        // has published for the document was computed for older text,
+        // and arriving last it would replace the answer for newer text
+        // (HLS sends `v24:error` then `v3:[]`). Dropped. An equal
+        // version replaces, so a server's own correction stands; a
+        // publish with no version (the spec's optional field; a
+        // project-wide check names none) takes effect and leaves the
+        // highest seen as it was.
+        if let Some(version) = params.get("version").and_then(Value::as_i64) {
+            let key = (sid, uri.clone());
+            if self
+                .published_versions
+                .get(&key)
+                .is_some_and(|&highest| version < highest)
+            {
+                return;
+            }
+            self.published_versions.insert(key, version);
+        }
         // E7c.3: each diagnostic is placed against the text it was
         // computed for --- the file on disk for a check source, the
         // text last sent for the server's own analysis --- as bytes,
@@ -3590,6 +3620,7 @@ impl LspManager {
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
         self.disk_documents.retain(|(s, _), _| *s != sid);
+        self.published_versions.retain(|(s, _), _| *s != sid);
         // dired Stage 2a §5 — terminal removal drops every tombstone
         // this server owned; other servers' pairs are retained.
         self.forgotten_documents.retain(|(s, _)| *s != sid);
@@ -3809,6 +3840,7 @@ impl LspManager {
             });
         self.documents.remove(&(sid, uri.to_owned()));
         self.disk_documents.remove(&(sid, uri.to_owned()));
+        self.published_versions.remove(&(sid, uri.to_owned()));
         Ok(())
     }
 
@@ -3849,6 +3881,8 @@ impl LspManager {
         // must be admitted; another server's tombstone for the same URI
         // is untouched.
         self.forgotten_documents.remove(&(sid, uri.clone()));
+        // E10v.1: an opened document's versions start over.
+        self.published_versions.remove(&(sid, uri.clone()));
         // T M4.5 Option B: mirror the document so the position codec
         // can convert per-line between the server's `character` units
         // and pmacs byte offsets.
@@ -4429,7 +4463,7 @@ fn default_capabilities() -> Value {
                     "documentation", "defaultLibrary"
                 ],
             },
-            "publishDiagnostics": { "relatedInformation": true },
+            "publishDiagnostics": { "relatedInformation": true, "versionSupport": true },
         },
     })
 }
