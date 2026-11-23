@@ -17,9 +17,14 @@ here gone stale covers the shape next to the defect.
   `inlaybounds`, `inlayrefresh`, `semantictokensrefresh`,
   `applyeditplan`, `resourceops`, `posecho`, `defenv`, `wsconfig`,
   `rooturi`, `leanprogress`.
-- Failure shapes: `crash`, `crashafteranswer`, `abortonopen`, `error`,
-  `contentmodified`, `clientfault`, `garbage`, `silent`,
-  `stopanswering`.
+- Failure shapes: `crash`, `crashafteranswer`, `crashonmarker`,
+  `abortonopen`, `error`, `contentmodified`, `clientfault`, `garbage`,
+  `silent`, `stopanswering`.
+- Any mode: a publish plan (`PMACS_FAKE_LSP_PUBLISH_PLAN`), a result
+  plan (`PMACS_FAKE_LSP_RESULT_PLAN`, held by
+  `PMACS_FAKE_LSP_RESULT_HOLD_MS`), and the capabilities and message
+  sinks (`PMACS_FAKE_LSP_CAPABILITIES_SINK`,
+  `PMACS_FAKE_LSP_MESSAGE_SINK`).
 - Watchers: `filewatch` (`RelativePattern` `**/*.txt`), `filewatchabs`
   (absolute glob), `filewatchflat` (no `**/`), `filewatchbare` (bare
   relative), `filewatchrereg` (one id twice), `filewatchjoin`,
