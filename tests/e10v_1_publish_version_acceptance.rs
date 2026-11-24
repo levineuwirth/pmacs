@@ -173,6 +173,7 @@ struct Fixture {
     file: PathBuf,
     plan: PathBuf,
     caps: PathBuf,
+    completion: PathBuf,
 }
 
 fn fixture(tag: &str, name: &str, text: &str, steps: &Value) -> Fixture {
@@ -183,8 +184,11 @@ fn fixture(tag: &str, name: &str, text: &str, steps: &Value) -> Fixture {
     std::fs::write(&file, text).unwrap();
     let plan = dir.join("plan.json");
     std::fs::write(&plan, steps.to_string()).unwrap();
+    let completion = dir.join("completion.json");
+    std::fs::write(&completion, "[]").unwrap();
     Fixture {
         caps: dir.join("caps.json"),
+        completion,
         dir,
         file,
         plan,
@@ -193,7 +197,8 @@ fn fixture(tag: &str, name: &str, text: &str, steps: &Value) -> Fixture {
 
 impl Fixture {
     /// An editor with the fake server for `language`, the file open and
-    /// the server initialized.
+    /// the server initialized. The server answers completion with an
+    /// empty list, so no popup it fills can open under a row's keys.
     fn editor(&self, language: &str) -> EditorState {
         let s = EditorState::new_with_roots(&iso::roots());
         s.lua_host.lua().remove_app_data::<StateDir>();
@@ -206,11 +211,13 @@ impl Fixture {
                  pmacs.project.set_search_boundary({dir:?})\n\
                  pmacs.lsp.config.{language} = {{ command = '{cmd}', env = {{ \
                    PMACS_FAKE_LSP_PUBLISH_PLAN = '{plan}', \
-                   PMACS_FAKE_LSP_CAPABILITIES_SINK = '{caps}' }} }}\n",
+                   PMACS_FAKE_LSP_CAPABILITIES_SINK = '{caps}', \
+                   PMACS_FAKE_LSP_COMPLETION_PLAN = '{completion}' }} }}\n",
                 dir = self.dir.display().to_string(),
                 cmd = fake_lsp_path(),
                 plan = self.plan.display(),
                 caps = self.caps.display(),
+                completion = self.completion.display(),
             ),
         );
         self.open(&s);
@@ -481,8 +488,12 @@ fn e10v_1_hls_2_15s_lasting_failure_replayed_keeps_the_error() {
         s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(ch)));
         tick(&mut s);
     }
-    // The fake answers completion; `C-g` closes its popup so Enter
-    // breaks the line rather than accepting an item.
+    // The fake answers completion with nothing, so Enter breaks the
+    // line. When it answered with items, `C-g` closed their popup only
+    // if the answer had landed: one that landed after it opened the
+    // popup again and Enter accepted `print!` (CI run 45481057027's
+    // `ubuntu-latest / lua54` leg). `C-g` still closes any popup a
+    // provider in the editor opened.
     s.dispatch_key(
         FrontendId::LOCAL,
         KeyEvent {
@@ -491,6 +502,10 @@ fn e10v_1_hls_2_15s_lasting_failure_replayed_keeps_the_error() {
         },
     );
     tick(&mut s);
+    assert!(
+        !eval::<bool>(&s, "return pmacs.completion.popup_visible()"),
+        "premise: no completion popup is open for Enter"
+    );
     s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Enter));
     tick(&mut s);
     for ch in "oops = True".chars() {
