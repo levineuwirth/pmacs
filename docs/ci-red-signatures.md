@@ -20415,6 +20415,131 @@ Fix round 1's, in `pmacs-e10o` at `nice -n 19` with six build jobs:
 
 So, after E10v's fix round 1: `main` is `3050d90`, green. PR #540 is open at `3a92af5`, green on every job, not rerun. No row's count moves here.
 
+### E10v fix round 2: `main` green at `df8c19a`; PR #540 red at `04e7557` on one leg, the branch's own row, green at `9d9fd2e`
+
+Recorded 2026-11-24 by the E10v fix round 2 session. Each run below was read from the run's jobs by conclusion and each test leg from its own log (fetched with escape sequences and stripped), every `running` line paired with its own result line; each run id and gate log was searched for in this file first, and none was here. `df8c19a`'s runs were owed since that record was pushed.
+
+#### `main` at `df8c19a`, E10v fix round 1's registry record: green
+
+`CI` 45258530923 at `df8c19a`, attempt 1 of 1, `push`, created 2026-11-23T20:21:28Z and completed 2026-11-23T20:23:51Z: `success`, the registry-push shape. The matrix job's name is its template, unexpanded, written here as earlier records write it.
+
+Tally (main-ci-df8c19a): 15 = 6 + 9.
+
+Tally (main-ci-df8c19a-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 137986675334 | success |
+| Lint (lua54) | 137986675433 | success |
+| Changed paths | 137986675610 | success |
+| Format | 137986675643 | success |
+| Commit attribution (D9) | 137986675873 | success |
+| Docs consistency | 137986833172 | success |
+| Test (crdt) | 137986835384 | skipped |
+| M1 Acceptance Gates | 137986835513 | skipped |
+| M5 Perf Gates | 137986835659 | skipped |
+| Perf budgets (debug) | 137986835740 | skipped |
+| M6 Perf Gates | 137986835967 | skipped |
+| M10 Perf Gates (crdt) | 137986836326 | skipped |
+| M4 Perf Gates | 137986836564 | skipped |
+| Test (matrix) | 137986836826 | skipped |
+| GPU Render (headless) | 137986836905 | skipped |
+
+Tally (main-ci-df8c19a-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-df8c19a-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45258531013 at `df8c19a`, attempt 1 of 1, `push`, created 2026-11-23T20:21:28Z and completed 2026-11-23T20:21:49Z: `success`, `Grammar fuzz (asan-strict)` 137986679308, `Grammar fuzz` 137986679890.
+
+Tally (main-fuzz-df8c19a): 2 = 2 + 0.
+
+#### PR #540 at `04e7557`, E10v fix round 2's fix and witnesses: red on one leg, the branch's own row
+
+`CI` 45481057027 at `04e7557`, attempt 1 of 1, `pull_request` (the merge `e83f99c` into `df8c19a`), created 2026-11-24T20:27:49Z and completed 2026-11-24T21:24:06Z: `failure`, on `Test (ubuntu-latest / lua54)` 138754227832 alone.
+
+The red: `e10v_1_hls_2_15s_lasting_failure_replayed_keeps_the_error` (`tests/e10v_1_publish_version_acceptance.rs`, E10v.1's, this branch's), `premise: the typed text`, the buffer ending `oops :: print!oops = True` at `tests/e10v_1_publish_version_acceptance.rs:513:5`. The row types `oops :: Int`, `C-g`, Enter, `oops = True` against the fake server, whose completion answer offers `print!`. Read on the laptop by an instrumented copy of the row, with the fake answering completion 100 ms late and the row waiting 1.5 s before the tick after `C-g`: the popup was closed through `t` and after `C-g` was dispatched, open after that tick, and the text ended as on CI, red in 12 of 13 runs. Without the delay and the wait, the popup is open at `n` and `C-g` closes it. So a completion answer in flight at the row's `C-g` opened the popup after it, and Enter accepted an item. Matched against the open issues by the row's name and the premise's words: none. Fixed by a new commit, `9d9fd2e`, which answers the suite's completion with an empty list and asserts that no popup is open before Enter; the editor's behavior is filed as #545. Not rerun.
+
+The red leg's 251 `running` lines each paired with a result line, 250 `ok` and 1 `FAILED`, 5,925 passed, 1 failed, 88 ignored. Cargo ran no target after `pmacs`'s own (`error: 1 target failed`), so `Doc-tests pmacs` and `pmacs_protocol`'s unit tests, 1 and 59 tests on the luajit leg, did not run there. Every other test leg paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit)` 138754227847 on `ubuntu-24.04` `20261116.376.1`, 253, 5,986 / 0 / 88 (the red leg on the same image); `Test (macos-latest / luajit)` 138754227951 and `Test (macos-latest / lua54)` 138754227816 on `macos-26-arm64` `20261117.0516.1`, 254 each, 5,927 / 0 / 80; `Test (crdt)` 138754227672 on `ubuntu-24.04` `20261116.133.1`, 252, 5,927 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 138754227888 on `ubuntu-24.04` `20261116.133.1`, 253, 5,215 / 0 / 72. One `running` line more on each leg than at `3a92af5`, the round's new suite `e10v_544_undo_across_the_upgrade`, 8 of 8 on each leg that builds `crdt` and empty without it.
+
+Tally (pr540-ci-04e7557): 19 = 17 + 1 + 1.
+
+Tally (pr540-ci-04e7557-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 138754005962 | success |
+| Commit attribution (D9) | 138754006319 | success |
+| Lint (luajit) | 138754006356 | success |
+| Lint (lua54) | 138754006532 | success |
+| Format | 138754006697 | success |
+| Test (crdt) | 138754227672 | success |
+| M1 Acceptance Gates | 138754227681 | success |
+| M5 Perf Gates | 138754227693 | success |
+| GPU Render (headless) | 138754227776 | success |
+| M4 Perf Gates | 138754227802 | success |
+| M10 Perf Gates (crdt) | 138754227809 | success |
+| Test (macos-latest / lua54) | 138754227816 | success |
+| Test (ubuntu-latest / lua54) | 138754227832 | failure |
+| Test (ubuntu-latest / luajit) | 138754227847 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 138754227888 | success |
+| Test (macos-latest / luajit) | 138754227951 | success |
+| Perf budgets (debug) | 138754227973 | success |
+| M6 Perf Gates | 138754228030 | success |
+| Docs consistency | 138754230641 | skipped |
+
+Tally (pr540-ci-04e7557-success): 17 rows of the table above with `result` = `success`.
+Tally (pr540-ci-04e7557-failure): 1 row of the table above with `result` = `failure`.
+Tally (pr540-ci-04e7557-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45481057041 at `04e7557`, attempt 1 of 1, `pull_request`, created 2026-11-24T20:27:49Z and completed 2026-11-24T20:28:04Z: `success`, `Grammar fuzz (asan-strict)` 138754005978, `Grammar fuzz` 138754006505.
+
+Tally (pr540-fuzz-04e7557): 2 = 2 + 0.
+
+#### PR #540 at `9d9fd2e`, E10v fix round 2's fix of the red row: green
+
+`CI` 45496525883 at `9d9fd2e`, attempt 1 of 1, `pull_request` (the merge `353b9ee` into `df8c19a`), created 2026-11-24T21:59:25Z and completed 2026-11-24T22:58:15Z: `success`. Every test leg paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit)` 138808533101 and `Test (ubuntu-latest / lua54)` 138808533218 on `ubuntu-24.04` `20261116.133.1`, 253 each, 5,986 / 0 / 88; `Test (macos-latest / luajit)` 138808533060 and `Test (macos-latest / lua54)` 138808532962 on `macos-26-arm64` `20261117.0516.1`, 254 each, 5,927 / 0 / 80; `Test (crdt)` 138808532896 on `ubuntu-24.04` `20261116.376.1`, 252, 5,927 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 138808533097 on `ubuntu-24.04` `20261116.376.1`, 253, 5,215 / 0 / 72. `e10v_1_hls_2_15s_lasting_failure_replayed_keeps_the_error` `ok` on every leg, `Test (ubuntu-latest / lua54)` included.
+
+Tally (pr540-ci-9d9fd2e): 19 = 18 + 1.
+
+Tally (pr540-ci-9d9fd2e-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 138808401171 | success |
+| Lint (luajit) | 138808401578 | success |
+| Commit attribution (D9) | 138808401591 | success |
+| Format | 138808401820 | success |
+| Lint (lua54) | 138808401843 | success |
+| Test (crdt) | 138808532896 | success |
+| M5 Perf Gates | 138808532903 | success |
+| GPU Render (headless) | 138808532938 | success |
+| Perf budgets (debug) | 138808532959 | success |
+| Test (macos-latest / lua54) | 138808532962 | success |
+| M1 Acceptance Gates | 138808532986 | success |
+| M4 Perf Gates | 138808532997 | success |
+| Test (macos-latest / luajit) | 138808533060 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 138808533097 | success |
+| Test (ubuntu-latest / luajit) | 138808533101 | success |
+| M6 Perf Gates | 138808533116 | success |
+| Test (ubuntu-latest / lua54) | 138808533218 | success |
+| M10 Perf Gates (crdt) | 138808533296 | success |
+| Docs consistency | 138808536567 | skipped |
+
+Tally (pr540-ci-9d9fd2e-success): 18 rows of the table above with `result` = `success`.
+Tally (pr540-ci-9d9fd2e-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45496525913 at `9d9fd2e`, attempt 1 of 1, `pull_request`, created 2026-11-24T21:59:25Z and completed 2026-11-24T21:59:41Z: `success`, `Grammar fuzz` 138808400872, `Grammar fuzz (asan-strict)` 138808401354.
+
+Tally (pr540-fuzz-9d9fd2e): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+Fix round 2's, in `pmacs-e10o` at `nice -n 19` with six build jobs, the runbook's sampler beside each, the default plan:
+
+- `20261124T200754Z-1028510` at `04e7557`: all passed, no daemon survived, 261 pairs, 6,387 / 0 / 88 (load 1.74 to 13.90).
+- `20261124T214238Z-1449276` at `9d9fd2e`: all passed, no daemon survived, 261 pairs, 6,387 / 0 / 88 (load 4.12 to 17.16).
+
+So, after E10v's fix round 2: `main` is `df8c19a`, green. PR #540 is open at `9d9fd2e`, green on every job, not rerun; its red at `04e7557` was the branch's own row, fixed by a new commit. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
