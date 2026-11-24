@@ -57,56 +57,10 @@ impl Document {
     }
 }
 
-/// Project only the displayed bytes. The daemon's byte offsets still refer
-/// to the original tab characters and line endings.
-pub fn display_line(mut text: String, cursor: Option<usize>) -> (String, Option<usize>) {
-    if text.ends_with('\n') {
-        text.pop();
-        if text.ends_with('\r') {
-            text.pop();
-        }
-    }
-    let cursor = cursor.map(|i| text.floor_char_boundary(i.min(text.len())));
-    if !text.contains('\t') {
-        return (text, cursor);
-    }
-    let mut display = String::with_capacity(text.len());
-    let mut column = 0;
-    let mut caret = None;
-    for (i, ch) in text.char_indices() {
-        if cursor == Some(i) {
-            caret = Some(display.len());
-        }
-        let next = pmacs_protocol::columns::advance_char(column, ch);
-        if ch == '\t' {
-            display.extend(std::iter::repeat_n(' ', (next - column) as usize));
-        } else {
-            display.push(ch);
-        }
-        column = next;
-    }
-    if cursor == Some(text.len()) {
-        caret = Some(display.len());
-    }
-    (display, caret)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use loro::ExportMode;
-
-    #[test]
-    fn caret_bytes_follow_tab_stops_wide_characters_and_crlf() {
-        let source = "界\t😀\r\n";
-        let display = "界      😀";
-        for (byte, mapped) in [(0, 0), (3, 3), (4, 9), (8, 13), (9, 13)] {
-            assert_eq!(
-                display_line(source.into(), Some(byte)),
-                (display.into(), Some(mapped))
-            );
-        }
-    }
 
     #[test]
     fn unicode_edits_keep_visible_lines_in_sync_across_replayed_updates() {

@@ -80,6 +80,11 @@ def exercise(args, runtime, processes):
     # attach and while each subsequent wtype invocation sends its keys.
     launch("keyboard", "wtype", "-s", "120000")
 
+    if args.selection_baseline:
+        from wayland_selection import source_selection
+        source_selection(args, runtime, run, launch, wait_for)
+        return
+
     if args.build_baseline:
         path = runtime / "src/ledger_tests.rs"
     else:
@@ -194,6 +199,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpui", type=Path, required=True)
     fixtures = parser.add_mutually_exclusive_group()
     fixtures.add_argument("--build-baseline", type=Path, help="also exercise the build panel using proj/tally and rig/vpointer.py from this baseline directory")
+    fixtures.add_argument("--selection-baseline", type=Path, help="compare source gestures on the baseline ledger and Unicode fixture using rig/vpointer.py")
+    parser.add_argument("--stock", action="store_true", help="run the selection comparison with the shipped GUI")
     parser.add_argument("--ocr-language", default="eng", help="installed Tesseract language for build output")
     fixtures.add_argument("--fixture", type=Path, help="optional Rust source to copy into the private session")
     parser.add_argument("--output", type=Path, required=True, help="new directory for captures and logs")

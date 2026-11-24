@@ -4316,6 +4316,7 @@ dependencies = [
  "pmacs-attach-client",
  "pmacs-protocol",
  "ropey",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@ mod document;
 mod input;
 mod palette;
 mod panel;
+mod source;
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -12,15 +13,16 @@ use std::process::ExitCode;
 use async_channel::Receiver;
 use document::Document;
 use gpui::{
-    Application, Bounds, Context, Div, FocusHandle, KeyDownEvent, Render, ScrollStrategy,
-    SharedString, UniformListScrollHandle, Window, WindowBounds, WindowOptions, canvas, div, fill,
-    point, prelude::*, px, rgb, size, uniform_list,
+    Application, Bounds, Context, Div, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, WindowBounds, WindowOptions, canvas, div, fill, point, prelude::*, px, rgb, size,
+    uniform_list,
 };
 use palette::Prompt;
 use pmacs_attach_client::{
     AttachClient, AttachEvent, InitialTargetPaths, connect_with_target_and_sink,
 };
-use pmacs_protocol::{BufferId, ByteRange, InstanceMessage, MinibufferRow};
+use pmacs_protocol::{BufferId, ByteRange, InstanceMessage, MinibufferRow, PointerKind};
 
 const SOURCE_FONT: &[u8] = include_bytes!("../../pmacs-gpu/fonts/JetBrainsMono-Regular.ttf");
 const USAGE: &str = "Usage: pmacs-gpui --attach SOCKET FILE";
@@ -37,6 +39,9 @@ struct FileView {
     reveal_cursor: bool,
     source_scroll: UniformListScrollHandle,
     viewport: Option<ByteRange>,
+    painted: source::PaintedRows,
+    selection: source::Selection,
+    source_drag: Option<(gpui::Point<gpui::Pixels>, u64)>,
     panel: panel::Panel,
     prompt: Option<Prompt>,
     prompt_scroll: UniformListScrollHandle,
@@ -48,6 +53,8 @@ impl FileView {
         match message {
             InstanceMessage::CrdtOp { buffer_id, op } if buffer_id == self.id => {
                 self.document.import(&op.bytes)?;
+                self.painted.clear();
+                self.source_drag = None;
             }
             InstanceMessage::StatusFacts {
                 buffer_id,
@@ -77,7 +84,18 @@ impl FileView {
                     self.source_scroll = UniformListScrollHandle::new();
                 }
                 self.viewport = None;
+                self.painted = Default::default();
+                self.source_drag = None;
+                self.selection = Default::default();
                 self.cursor = None;
+            }
+            InstanceMessage::Decorations {
+                buffer_id,
+                full,
+                segments,
+                ..
+            } if buffer_id == self.id => {
+                return Ok(self.selection.apply(full, segments));
             }
             InstanceMessage::CursorByte {
                 buffer_id,
@@ -147,9 +165,77 @@ impl FileView {
             self.prompt_scroll = UniformListScrollHandle::new();
         }
         if let Some(p) = &prompt {
+            self.source_drag = None;
             p.reveal_selected(&self.prompt_scroll);
         }
         self.prompt = prompt;
+    }
+
+    fn send_pointer(
+        &mut self,
+        byte: u64,
+        kind: PointerKind,
+        mods: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(client) = &self.client
+            && let Err(error) = client.send_pointer(self.id, byte, kind, input::modifiers(mods))
+        {
+            self.source_drag = None;
+            self.notice = Some(format!("Could not send source pointer · {error}"));
+            cx.notify();
+        }
+    }
+
+    fn source_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt.is_some() || self.notice.is_some() {
+            return;
+        }
+        if let Some(byte) = self.painted.byte(event.position, false) {
+            let kind = match event.click_count {
+                2 => PointerKind::DoubleDown,
+                3 => PointerKind::TripleDown,
+                _ => PointerKind::Down,
+            };
+            self.source_drag = Some((event.position, byte));
+            self.send_pointer(byte, kind, event.modifiers, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    fn drag_to(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        mods: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if self.notice.is_some() {
+            self.source_drag = None;
+        }
+        if let Some((last_position, last_byte)) = self.source_drag
+            && last_position != position
+            && let Some(byte) = self.painted.byte(position, true)
+        {
+            self.source_drag = Some((position, byte));
+            if byte != last_byte {
+                self.send_pointer(byte, PointerKind::Drag, mods, cx);
+            }
+        }
+    }
+
+    fn source_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.dragging() {
+            self.drag_to(event.position, event.modifiers, cx);
+        } else {
+            self.source_drag = None;
+        }
+    }
+
+    fn source_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.drag_to(event.position, event.modifiers, cx);
+        if let Some((_, byte)) = self.source_drag.take() {
+            self.send_pointer(byte, PointerKind::Up, event.modifiers, cx);
+        }
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -217,6 +303,7 @@ impl gpui::UniformListDecoration for SourceViewport {
         cx: &mut gpui::App,
     ) -> gpui::AnyElement {
         self.0.update(cx, |view, cx| {
+            view.painted.clear();
             let visible = view.document.with_lines(|r| ByteRange {
                 start: r.line_to_byte(rows.start.min(r.len_lines())) as u64,
                 end: r.line_to_byte(rows.end.min(r.len_lines())) as u64,
@@ -296,8 +383,8 @@ impl Render for FileView {
                         .map(|index| {
                             let cursor =
                                 caret.filter(|(row, _)| *row == index).map(|(_, byte)| byte);
-                            let (line, cursor) =
-                                document::display_line(rope.line(index).to_string(), cursor);
+                            let start = rope.line_to_byte(index) as u64;
+                            let line = rope.line(index).to_string();
                             div()
                                 .w_full()
                                 .h(px(22.))
@@ -314,12 +401,13 @@ impl Render for FileView {
                                         .text_color(rgb(0x827f79))
                                         .child((index + 1).to_string()),
                                 )
-                                .child(text_with_caret(line.into(), cursor).flex_1().min_w_0())
+                                .child(this.painted.row(line, start, cursor, &this.selection))
                         })
                         .collect::<Vec<_>>()
                 })
             }),
         )
+        .on_mouse_down(MouseButton::Left, cx.listener(Self::source_down))
         .with_decoration(SourceViewport(cx.entity()))
         .track_scroll(self.source_scroll.clone())
         .flex_1()
@@ -329,6 +417,9 @@ impl Render for FileView {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_move(cx.listener(Self::source_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::source_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::source_up))
             .size_full()
             .flex()
             .flex_col()
@@ -471,6 +562,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     let focus = cx.focus_handle();
                     focus.focus(window);
                     cx.observe_window_activation(window, |view: &mut FileView, w, cx| {
+                        if !w.is_window_active() {
+                            view.source_drag = None;
+                        }
                         if let Some(client) = &view.client
                             && let Err(error) = client.send_focus(w.is_window_active())
                         {
@@ -492,6 +586,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                         reveal_cursor: false,
                         source_scroll: UniformListScrollHandle::new(),
                         viewport: None,
+                        painted: Default::default(),
+                        selection: Default::default(),
+                        source_drag: None,
                         panel: panel::Panel::new(client_version),
                         prompt: None,
                         prompt_scroll: UniformListScrollHandle::new(),

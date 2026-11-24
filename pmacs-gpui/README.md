@@ -62,3 +62,19 @@ The check copies the baseline’s `proj/tally` to its private session and uses
 an installed OCR language with `--ocr-language` (the default is `eng`).
 It checks the failure, resizes and clicks the panel, corrects the assertion
 in the source, reruns the tests, and undoes the correction.
+
+Click in the source to place the caret. Drag to select, or Shift-click to
+extend the selection. Clicks in an expanded tab land at the nearer edge of
+the original tab. The caret and the highlight follow the shaped text,
+including emoji. The daemon supplies the selection shown after either a
+pointer gesture or a keyboard command.
+
+For the source comparison, pass `--selection-baseline /path/to/pmacs-baseline`
+to the native test. Repeat with `--stock` and a different output directory
+to measure the shipped GUI. Both runs copy the same Rust ledger, use a
+separate Unicode fixture, and compare saved bytes at 100% and 150% scale.
+
+The trial pins the published GPUI 0.2.2 crate. Revisit the dependency when the
+[standalone upstream](https://github.com/zed-industries/gpui) publishes a
+buildable release. Run the native editing, panel, selection and scale checks
+against the candidate before changing the pin.
