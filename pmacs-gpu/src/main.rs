@@ -1899,8 +1899,13 @@ fn dropdown_probe_facts(state: &mut State, label: &str, out: &mut String) {
     }
 }
 
+/// #544: the most text `place:` writes as its `text` fact; a fixture is a
+/// few hundred bytes, and a large buffer's report stays small.
+const PLACE_TEXT_FACT_LIMIT: usize = 16 * 1024;
+
 /// E10a --- where the window is, under `label`: the band's name for the
-/// buffer it shows, how many bytes of it the window holds, its own
+/// buffer it shows, how many bytes of it the window holds, and (#544) the
+/// text itself up to [`PLACE_TEXT_FACT_LIMIT`], its own
 /// caret as a byte and as the 1-based line and column of that text
 /// (`none` while the daemon has named no caret in this buffer), the
 /// first line of its view, and the band's message. What a person reads off the window after a jump, a rename
@@ -1962,6 +1967,13 @@ fn place_probe_facts(state: &State, label: &str, out: &mut String) {
     );
     let _ = writeln!(out, "{label}.scroll_top={}", state.scroll_top);
     let _ = writeln!(out, "{label}.text_len={}", state.current_text.len());
+    // #544: the text the window's own replica holds, which follows its
+    // loro document's deltas, so a row can read what an undo the daemon
+    // made left in this replica. Up to PLACE_TEXT_FACT_LIMIT bytes, past
+    // which the length above is all there is.
+    if state.current_text.len() <= PLACE_TEXT_FACT_LIMIT {
+        let _ = writeln!(out, "{label}.text={:?}", state.current_text);
+    }
     let caret = state
         .own_cursor
         .filter(|own| state.current_buffer_id == Some(own.buffer_id))
