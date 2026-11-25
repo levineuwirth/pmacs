@@ -93,6 +93,20 @@ pub struct Minibuffer {
     /// a key is compared only with the same prompt's after it: an
     /// accept that opens another prompt is not a move.
     pub generation: u64,
+    /// E10aa (D18 as amended 2026-11-25): the user has moved the
+    /// selection since the field last changed, so under
+    /// [`AcceptPolicy::Typed`] RET takes it. Set by a move
+    /// ([`Self::scroll_candidate`]: Up and Down over candidates, `M-n`
+    /// and `M-p`, and Lua's `pmacs.minibuffer.scroll`, their scripted
+    /// spelling) over a list computed for the field as it stands;
+    /// cleared by any change to the field's text and by a recompute that
+    /// selects another candidate. An open and a recompute never set it.
+    moved: bool,
+    /// The field's text when the candidate list was last computed: a
+    /// history recall replaces the field without a recompute, and a move
+    /// over the list it leaves behind, computed for other text, is not
+    /// recorded.
+    listed_for: String,
 }
 
 impl Minibuffer {
@@ -110,6 +124,8 @@ impl Minibuffer {
             history: HashMap::new(),
             history_dir: None,
             generation: 0,
+            moved: false,
+            listed_for: String::new(),
         }
     }
 
@@ -134,6 +150,9 @@ impl Minibuffer {
         let replaced = self.session.take().and_then(|old| old.on_replace);
         self.generation += 1;
         self.replace_contents(&session.initial.clone());
+        // A new prompt starts unmoved, over no list yet.
+        self.moved = false;
+        self.listed_for.clear();
         self.cursor = self.buffer.len();
         // Lazy-load history once per bucket.
         if !session.history_bucket.is_empty() && !self.history.contains_key(&session.history_bucket)
@@ -166,8 +185,13 @@ impl Minibuffer {
     }
 
     /// Replace the buffer's contents with `s`. Notifies the text view
-    /// of the resulting edit so cursor coordinates stay valid.
+    /// of the resulting edit so cursor coordinates stay valid. Other
+    /// text than the field held returns RET to the field (E10aa): TAB's
+    /// completion, a history recall and a scripted set all come here.
     pub fn replace_contents(&mut self, s: &str) {
+        if self.contents() != s {
+            self.moved = false;
+        }
         let len = self.buffer.len();
         if len > 0 {
             let edit = self
@@ -191,10 +215,15 @@ impl Minibuffer {
         self.cursor = self.buffer.len();
     }
 
+    /// A typed edit of the field: an insertion or a deletion, which
+    /// returns RET to the field (E10aa). The callers skip the no-op
+    /// cases (Backspace at the start, a delete at the end), which change
+    /// nothing and so clear nothing here.
     fn apply(&mut self, op: EditOp<'_>) {
         let Ok(edit) = self.buffer.apply_edit(op) else {
             return;
         };
+        self.moved = false;
         let _ = self.text_view.on_edit(&self.buffer, &edit);
     }
 
@@ -255,10 +284,20 @@ impl Minibuffer {
 
     /// Cycle the selected candidate forward by `delta` (negative
     /// allowed). No-op when no candidates exist.
+    ///
+    /// This is the user's move (E10aa): Up and Down over candidates and
+    /// `M-n`/`M-p` reach it, and so does `pmacs.minibuffer.scroll`. It
+    /// records the move, so RET under [`AcceptPolicy::Typed`] takes the
+    /// selection, even when the move lands where it began (one
+    /// candidate, or Down then Up). A list left behind by a history
+    /// recall was computed for other text, and a move over it is not
+    /// recorded: RET then takes the field.
     pub fn scroll_candidate(&mut self, delta: i32) {
+        let fresh = self.session.is_some() && self.contents() == self.listed_for;
         let Some(s) = self.session.as_mut() else {
             return;
         };
+        self.moved = fresh && !s.candidates.is_empty();
         if s.candidates.is_empty() {
             s.selected = None;
             return;
@@ -431,10 +470,12 @@ impl Minibuffer {
     /// and returns the on-accept callback paired with the resolved
     /// value.
     ///
-    /// **Resolution.** If the session has a non-empty completion
-    /// source and a selected candidate, the selected candidate is
-    /// returned --- the typed text is treated as a search query.
-    /// Sources of [`CompletionSource::None`], or sessions with no
+    /// **Resolution.** By the session's [`AcceptPolicy`] (D18): under
+    /// `Candidate` a selected candidate is returned --- the typed text is
+    /// treated as a search query; under `Typed` the selected candidate
+    /// only when the user moved the selection since the field last
+    /// changed (E10aa), else the typed text. Sources of
+    /// [`CompletionSource::None`], `Key` sessions, and sessions with no
     /// matches, fall through to the literal typed contents (so
     /// free-form prompts like "search: " behave naturally).
     ///
@@ -456,8 +497,9 @@ impl Minibuffer {
         let resolved = if typed_wins {
             typed.clone()
         } else {
-            resolve_accepted_value(&session, &typed)
+            resolve_accepted_value(&session, &typed, self.moved)
         };
+        self.moved = false;
         if !session.history_bucket.is_empty() && !resolved.is_empty() {
             let history = self
                 .history
@@ -481,11 +523,21 @@ impl Minibuffer {
 
     /// Recompute the candidate list against the current buffer
     /// contents. Resets the selected index to the top match.
+    ///
+    /// A recompute never records a move (E10aa). One that leaves another
+    /// candidate selected than before clears the record, so RET returns
+    /// to the field; one that leaves the same candidate selected keeps
+    /// it, since the selection the user chose is still the one shown.
+    /// Recomputes run with the field unchanged (Backspace at the start,
+    /// a delete at the end, a TAB that completes nothing, a source's
+    /// late list through `pmacs.minibuffer.refresh`), and each puts the
+    /// selection on the top match.
     pub fn recompute_candidates(
         &mut self,
         commands: &CommandRegistry,
         registry: &BufferRegistry,
     ) -> mlua::Result<()> {
+        let before = self.selected_candidate();
         let Some(s) = self.session.as_mut() else {
             return Ok(());
         };
@@ -509,6 +561,10 @@ impl Minibuffer {
         } else {
             Some(0)
         };
+        if s.candidates.first() != before.as_ref() {
+            self.moved = false;
+        }
+        self.listed_for = needle;
         Ok(())
     }
 }
@@ -581,9 +637,13 @@ pub struct MinibufferSession {
 /// to create, a buffer name --- wants the text as written, or a new
 /// name that happens to be a subsequence of an existing one silently
 /// opens the existing entry (`C-x C-f nots RET` opened `notes.md`; audit
-/// §3.1). Under either policy `C-j` takes the typed text and TAB
-/// completes to the selection, so the policy decides only what RET
-/// means. `Key` is the third contract, Emacs's `y-or-n-p`: the first
+/// §3.1). But a selection the user moved is a choice, not a search
+/// result, so under `Typed` RET takes it until the field changes (D18 as
+/// amended 2026-11-25, E10aa; #546: `C-x C-f`, Down, RET opened the
+/// directory in dired while the prompt showed `[notes.txt]`). Under
+/// either policy `C-j` takes the typed text and TAB completes to the
+/// selection, so the policy decides only what RET means. `Key` is the
+/// third contract, Emacs's `y-or-n-p`: the first
 /// printable key IS the answer and the prompt closes on it, with RET
 /// committing whatever was typed (nothing, for a prompt nobody typed
 /// into) and `C-g` cancelling as everywhere.
@@ -594,7 +654,12 @@ pub enum AcceptPolicy {
     /// otherwise.
     #[default]
     Candidate,
-    /// RET takes the typed text as written, whatever is selected.
+    /// RET takes the typed text as written, unless the user has moved
+    /// the selection (Up or Down over candidates, `M-n`/`M-p`) since the
+    /// field last changed: then RET takes the selection, as `Candidate`
+    /// does (E10aa). With no move the selection is only a search result,
+    /// so a new name that is a subsequence of an existing one is created
+    /// as typed, and RET on an untouched prefilled directory opens it.
     Typed,
     /// A printable key commits itself, at once, as the typed text
     /// (E7b.2, `pmacs.minibuffer.y_or_n`). The prompt has no
@@ -764,10 +829,17 @@ impl CompletionSource {
     }
 }
 
-fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
-    if matches!(session.source, CompletionSource::None)
-        || matches!(session.accept, AcceptPolicy::Typed | AcceptPolicy::Key)
-    {
+/// What RET commits (D18): the selected candidate under `candidate`, and
+/// under `typed` when the user moved the selection since the field last
+/// changed (`moved`, E10aa); otherwise, and always under `key` or for a
+/// prompt with no source, the typed text.
+fn resolve_accepted_value(session: &MinibufferSession, typed: &str, moved: bool) -> String {
+    let takes_selection = match session.accept {
+        AcceptPolicy::Candidate => true,
+        AcceptPolicy::Typed => moved,
+        AcceptPolicy::Key => false,
+    };
+    if matches!(session.source, CompletionSource::None) || !takes_selection {
         return typed.to_owned();
     }
     if let Some(idx) = session.selected
@@ -1575,6 +1647,209 @@ mod tests {
         mb.recompute_candidates(&commands, &registry).unwrap();
         mb.complete();
         assert_eq!(mb.contents(), "buffer.save");
+    }
+
+    /// E10aa: a commands registry holding `alpha`, `notes` and `start`,
+    /// which an empty needle lists in that order.
+    fn three_commands(lua: &Lua) -> CommandRegistry {
+        let mut commands = CommandRegistry::new();
+        for name in ["alpha", "notes", "start"] {
+            commands
+                .define(crate::command::Command {
+                    name: name.into(),
+                    description: "x".into(),
+                    source: crate::command::SourceLocation::default(),
+                    body: lua.create_function(|_, ()| Ok(())).unwrap(),
+                })
+                .unwrap();
+        }
+        commands
+    }
+
+    /// E10aa: a prompt over [`three_commands`] under `policy`, with its
+    /// list computed as `pmacs.minibuffer.read` computes it at the open.
+    fn open_over_three(
+        mb: &mut Minibuffer,
+        lua: &Lua,
+        commands: &CommandRegistry,
+        policy: AcceptPolicy,
+    ) {
+        open(mb, lua, CompletionSource::Commands, "e10aa");
+        mb.session.as_mut().unwrap().accept = policy;
+        mb.recompute_candidates(commands, &BufferRegistry::new())
+            .unwrap();
+        assert_eq!(
+            mb.session.as_ref().unwrap().candidates,
+            vec!["alpha", "notes", "start"],
+            "premise: the three, in order"
+        );
+    }
+
+    fn accepted(mb: &mut Minibuffer) -> String {
+        mb.accept().expect("a session to accept").1
+    }
+
+    /// E10aa (D18 amended): under `typed` RET takes the field until the
+    /// user moves the selection, and then takes the selection, even a
+    /// move that lands where it began; `C-j` takes the field after a
+    /// move; `candidate` takes the selection with no move, as before.
+    #[test]
+    fn e10aa_a_moved_selection_takes_ret_under_typed_and_only_then() {
+        let lua = Lua::new();
+        let commands = three_commands(&lua);
+        let mut mb = Minibuffer::new();
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        assert_eq!(accepted(&mut mb), "", "no move: the field");
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        assert_eq!(accepted(&mut mb), "notes", "a move: the selection");
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        mb.scroll_candidate(-1);
+        assert_eq!(
+            accepted(&mut mb),
+            "alpha",
+            "Down then Up: the first candidate, chosen"
+        );
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        assert_eq!(
+            mb.accept_typed().unwrap().1,
+            "",
+            "C-j after a move: the field"
+        );
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Candidate);
+        assert_eq!(accepted(&mut mb), "alpha", "candidate: unchanged");
+
+        // The record does not outlive its prompt.
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        let _ = mb.cancel();
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        assert_eq!(accepted(&mut mb), "", "a new prompt starts unmoved");
+    }
+
+    /// E10aa: any change to the field's text returns RET to it: a typed
+    /// letter whose top match is the candidate moved to (so no recompute
+    /// clears it), a deletion, TAB's completion, a history recall.
+    #[test]
+    fn e10aa_a_change_to_the_field_returns_ret_to_the_field() {
+        let lua = Lua::new();
+        let commands = three_commands(&lua);
+        let registry = BufferRegistry::new();
+        let mut mb = Minibuffer::new();
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        mb.insert_char('n');
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        assert_eq!(
+            mb.selected_candidate().as_deref(),
+            Some("notes"),
+            "premise: `n` keeps `notes` selected"
+        );
+        assert_eq!(accepted(&mut mb), "n", "a typed letter: the field");
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.insert_char('n');
+        mb.insert_char('o');
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        mb.scroll_candidate(1);
+        mb.backspace();
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        assert_eq!(
+            mb.selected_candidate().as_deref(),
+            Some("notes"),
+            "premise: `n` keeps `notes` selected"
+        );
+        assert_eq!(accepted(&mut mb), "n", "a deletion: the field");
+
+        // `n` is now the bucket's last entry; a recall replaces the field.
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(2);
+        mb.history_prev();
+        assert_eq!(mb.contents(), "n", "premise: the recall");
+        assert_eq!(accepted(&mut mb), "n", "a recall: the field");
+
+        // TAB to a common prefix that keeps the moved-to candidate on top.
+        let mut two = CommandRegistry::new();
+        for name in ["alpha-one", "alpha-two"] {
+            two.define(crate::command::Command {
+                name: name.into(),
+                description: "x".into(),
+                source: crate::command::SourceLocation::default(),
+                body: lua.create_function(|_, ()| Ok(())).unwrap(),
+            })
+            .unwrap();
+        }
+        open(&mut mb, &lua, CompletionSource::Commands, "");
+        mb.session.as_mut().unwrap().accept = AcceptPolicy::Typed;
+        mb.insert_char('a');
+        mb.recompute_candidates(&two, &registry).unwrap();
+        mb.scroll_candidate(2);
+        mb.complete();
+        assert_eq!(mb.contents(), "alpha-", "premise: TAB to the prefix");
+        mb.recompute_candidates(&two, &registry).unwrap();
+        assert_eq!(
+            mb.selected_candidate().as_deref(),
+            Some("alpha-one"),
+            "premise: the recompute keeps `alpha-one` selected"
+        );
+        assert_eq!(accepted(&mut mb), "alpha-", "TAB: the field");
+    }
+
+    /// E10aa: a recompute never records a move; one that selects another
+    /// candidate clears the record, and one that leaves the same
+    /// candidate selected keeps it. A move over the list a recall left
+    /// behind, computed for other text, is not recorded.
+    #[test]
+    fn e10aa_a_recompute_keeps_the_record_only_on_the_same_candidate() {
+        let lua = Lua::new();
+        let commands = three_commands(&lua);
+        let registry = BufferRegistry::new();
+        let mut mb = Minibuffer::new();
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        assert_eq!(accepted(&mut mb), "", "a recompute is no move");
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        assert_eq!(
+            accepted(&mut mb),
+            "",
+            "the recompute selected `alpha` over `notes`: the field"
+        );
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.scroll_candidate(1);
+        mb.scroll_candidate(-1);
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        assert_eq!(
+            accepted(&mut mb),
+            "alpha",
+            "the recompute kept `alpha` selected: the selection"
+        );
+
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.insert_char('s');
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        let _ = accepted(&mut mb);
+        open_over_three(&mut mb, &lua, &commands, AcceptPolicy::Typed);
+        mb.history_prev();
+        assert_eq!(mb.contents(), "s", "premise: the recall");
+        mb.scroll_candidate(1);
+        assert_eq!(
+            accepted(&mut mb),
+            "s",
+            "a move over the list computed for the empty field: the field"
+        );
     }
 
     /// E4.1: the typed text reaches a custom source as its argument.

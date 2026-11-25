@@ -759,7 +759,8 @@ cmd { name = "editor.switch-buffer",
           -- and `C-x b scr RET` reaches `*scratch*`; a name that
           -- matches nothing is looked up as typed and refused below.
           -- find-file and write-file keep `typed`, since there the
-          -- typed name may be a file to create.
+          -- typed name may be a file to create; a selection moved there
+          -- is still what RET takes (E10aa).
           accept = "candidate",
           on_accept = function(name)
             if name == nil or name == "" then return end
@@ -801,15 +802,24 @@ cmd { name = "editor.switch-buffer",
 --    prompt is rooted in, Emacs's own shape, and typing `sub/` moves
 --    the listing into `sub` (E6.1, E6.3). Nothing recurses.
 --
--- 2. RET TAKES THE TYPED TEXT (D18, `accept = "typed"`). What arrives at
---    `on_accept` is the field as written, whatever is selected: a new
---    bare name that is a subsequence of an existing entry CREATES the
---    new file (`find_file_typed_text_wins_over_the_selected_candidate`),
---    and RET on the untouched prefilled directory opens it in dired
---    (`find_file_ret_on_the_prefilled_directory_opens_dired`). TAB
---    completes to the selection, so an existing file is still one TAB
---    and RET away. Before E6.1 the selected candidate shadowed the
---    typed text and `C-x C-f nots RET` opened `notes.md` (audit §3.1).
+-- 2. RET TAKES THE TYPED TEXT, OR A SELECTION THE USER MOVED (D18,
+--    `accept = "typed"`, as amended 2026-11-25 at E10aa). While nobody
+--    has moved the selection, what arrives at `on_accept` is the field
+--    as written: a new bare name that is a subsequence of an existing
+--    entry CREATES the new file
+--    (`find_file_typed_text_wins_over_the_selected_candidate`), and RET
+--    on the untouched prefilled directory opens it in dired
+--    (`find_file_ret_on_the_prefilled_directory_opens_dired`). Before
+--    E6.1 the selected candidate shadowed the typed text and
+--    `C-x C-f nots RET` opened `notes.md` (audit §3.1). A selection the
+--    user MOVED (Up or Down over the candidates, `M-n`/`M-p`) is a
+--    choice, so RET takes it, its directory part put back, until the
+--    field changes again: `C-x C-f`, Down, RET opens the file the prompt
+--    shows as `[notes.txt]`, where before E10aa it opened the directory
+--    in dired (#546). Typing, deleting, TAB and a history recall each
+--    return RET to the field. `C-j` takes the field whatever is
+--    selected, and TAB completes to the selection, so an existing file
+--    is also one TAB and RET away.
 --
 -- The root is the active buffer's directory, or the process cwd when the
 -- buffer has no backing path; both are prefilled with a trailing `/`.
@@ -922,7 +932,11 @@ cmd { name = "find-file",
 -- Write-file and revert (E1.5) ----------------------------------------------
 --
 -- `C-x C-w` roots its prompt exactly where `find-file` does, so the two
--- halves of "which directory am I in" cannot disagree. An existing file
+-- halves of "which directory am I in" cannot disagree, and its RET is
+-- find-file's: the field as written, or a selection the user moved since
+-- the field last changed (D18 as amended at E10aa), so `C-x C-w`, Down,
+-- RET writes to the file the prompt shows, after the question below when
+-- that file exists. An existing file
 -- at the destination is a question, not a refusal and not a silent
 -- overwrite: this buffer has never read that file, so nothing in the
 -- editor knows whether losing it matters.
