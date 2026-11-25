@@ -3752,7 +3752,19 @@ impl EditorState {
 
     /// Deliver a completed click only while the pressed document window and
     /// the point placed by that press are still current for this frontend.
-    pub(crate) fn panel_click(&mut self, source: FrontendId, window: WindowId, coord: CellCoord) {
+    pub(crate) fn panel_click(
+        &mut self,
+        source: FrontendId,
+        record: &crate::semantic_render::AcceptedPanelGesture,
+        coord: CellCoord,
+        mods: pmacs_protocol::Modifiers,
+    ) {
+        let PanelGestureDomain::Document { window } = record.domain else {
+            return;
+        };
+        if !record.plain_click || !mods.is_empty() || record.coord != coord {
+            return;
+        }
         let Some(byte) = self.panel_cell_byte(window, coord) else {
             return;
         };

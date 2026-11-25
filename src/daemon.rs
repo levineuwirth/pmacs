@@ -1401,14 +1401,7 @@ fn replay_panel_pointer(
                             kind,
                             mods,
                         );
-                        if record.plain_click
-                            && mods.is_empty()
-                            && record.coord == coord
-                            && let crate::editor::PanelGestureDomain::Document { window } =
-                                record.domain
-                        {
-                            editor.panel_click(source, window, coord);
-                        }
+                        editor.panel_click(source, &record, coord, mods);
                     }
                 }
                 Outcome::Consumed => {
