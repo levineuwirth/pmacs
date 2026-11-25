@@ -154,11 +154,18 @@ struct PaintedRow {
 #[derive(Clone, Default)]
 pub struct PaintedRows {
     rows: Rc<RefCell<Vec<PaintedRow>>>,
+    // Rows prepaint before the list decoration. It takes this frame’s anchor
+    // once, so scrolling the prefix out of view also hides its popup.
+    completion_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
     // Retain the active line's visible suffix while the caret is inside it.
     horizontal: Rc<Cell<Option<(u64, Pixels)>>>,
 }
 
 impl PaintedRows {
+    pub fn take_completion_anchor(&self) -> Option<Bounds<Pixels>> {
+        self.completion_anchor.take()
+    }
+
     pub fn clear(&self) {
         self.rows.borrow_mut().clear();
     }
@@ -186,9 +193,19 @@ impl PaintedRows {
         start: u64,
         caret: Option<usize>,
         selection: &Selection,
+        anchor: Option<u64>,
     ) -> Div {
         let selected = selection.on_row(start, source.len());
         let projection = Projection::new(source);
+        let anchor = anchor
+            .and_then(|byte| usize::try_from(byte.checked_sub(start)?).ok())
+            .filter(|i| {
+                *i <= projection
+                    .stops
+                    .last()
+                    .map_or(projection.text.len(), |s| s.0)
+            });
+        let completion_anchor = self.completion_anchor.clone();
         let painted = self.clone();
         let horizontal = self.horizontal.clone();
         div()
@@ -222,7 +239,18 @@ impl PaintedRows {
                             horizontal.set(Some((start, shift)));
                             shift
                         });
-                        (projection, line, caret, bounds.left() - shift)
+                        let origin = bounds.left() - shift;
+                        if let Some(byte) = anchor {
+                            let x = origin + line.x_for_index(projection.display(byte));
+                            let visible = bounds.intersect(&window.content_mask().bounds);
+                            if !visible.is_empty() && x >= visible.left() && x <= visible.right() {
+                                completion_anchor.set(Some(Bounds::new(
+                                    point(x, visible.top()),
+                                    size(px(0.), visible.size.height),
+                                )));
+                            }
+                        }
+                        (projection, line, caret, origin)
                     },
                     move |bounds, (projection, line, caret, origin), window, cx| {
                         let visible = bounds.intersect(&window.content_mask().bounds);

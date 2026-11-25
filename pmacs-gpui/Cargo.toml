@@ -15,6 +15,7 @@ pmacs-attach-client = { path = "../pmacs-attach-client" }
 libc = "=0.2.189"
 async-channel = "2"
 gpui = "=0.2.2"
+gpui-component = "=0.5.1"
 loro = "=1.12.0"
 ropey = { version = "1.6", default-features = false }
 pmacs-protocol = { path = "../pmacs-protocol" }

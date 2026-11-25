@@ -1,7 +1,8 @@
 use gpui::{
-    Div, FontWeight, Pixels, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
-    prelude::*, px, rgb, uniform_list,
+    Div, ElementId, FontWeight, Pixels, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, div, prelude::*, px, rgb, uniform_list,
 };
+use gpui_component::list::ListItem;
 use pmacs_protocol::MinibufferRow;
 
 use crate::text_with_caret;
@@ -89,7 +90,9 @@ impl Prompt {
                         .filter_map(|i| {
                             prompt.rows.get(i).map(|row| {
                                 candidate(
-                                    row,
+                                    ("command-row", i).into(),
+                                    &row.label,
+                                    row.detail.as_deref(),
                                     prompt.selected == Some(i as u32),
                                     narrow,
                                     row_height,
@@ -115,35 +118,46 @@ impl Prompt {
     }
 }
 
-fn candidate(row: &MinibufferRow, selected: bool, narrow: bool, height: Pixels) -> Div {
+pub fn candidate(
+    id: ElementId,
+    label: &str,
+    detail: Option<&str>,
+    selected: bool,
+    narrow: bool,
+    height: Pixels,
+) -> ListItem {
     let name = div()
         .truncate()
         .font_family("JetBrains Mono")
         .text_size(px(14.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(0xe6e3dc))
-        .when(!narrow && row.detail.is_some(), |d| {
+        .when(!narrow && detail.is_some(), |d| {
             d.w(gpui::relative(0.43)).flex_shrink_0()
         })
-        .child(row.label.clone());
-    div()
+        .child(label.to_owned());
+    let content = div()
         .w_full()
-        .h(height)
-        .px_4()
         .flex()
         .overflow_hidden()
         .when(narrow, |d| d.flex_col().justify_center())
         .when(!narrow, |d| d.items_center().gap_3())
-        .when(selected, |d| d.bg(rgb(0x3c3b38)))
         .child(name)
-        .when_some(row.detail.as_ref(), |d, detail| {
+        .when_some(detail, |d, detail| {
             d.child(
                 div()
                     .min_w_0()
                     .truncate()
                     .text_size(px(13.))
                     .text_color(rgb(0xbcb8b0))
-                    .child(detail.clone()),
+                    .child(detail.to_owned()),
             )
-        })
+        });
+    ListItem::new(id)
+        .selected(selected)
+        .w_full()
+        .h(height)
+        .px_4()
+        .py_0()
+        .child(content)
 }

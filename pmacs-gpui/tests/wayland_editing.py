@@ -60,7 +60,11 @@ def exercise(args, runtime, processes):
 
     config_dir = Path(env["XDG_CONFIG_HOME"]) / "pmacs"
     config_dir.mkdir()
-    (config_dir / "init.lua").write_text("pmacs.lsp.config = {}\n")
+    config_text = "pmacs.lsp.config = {}\n"
+    if args.completion_ledger:
+        from wayland_completion import PROVIDER
+        config_text += PROVIDER
+    (config_dir / "init.lua").write_text(config_text)
 
     if args.build_baseline:
         for name in ("Cargo.toml", "Cargo.lock"):
@@ -89,7 +93,8 @@ def exercise(args, runtime, processes):
         path = runtime / "src/ledger_tests.rs"
     else:
         path = runtime / "ledger.rs"
-        path.write_bytes(args.fixture.read_bytes() if args.fixture else b"// Ledger entries\nfn main() {}\n")
+        fixture = args.completion_ledger or args.fixture
+        path.write_bytes(fixture.read_bytes() if fixture else b"// Ledger entries\nfn main() {}\n")
     original = path.read_bytes()
     first_line = original.decode().splitlines()[0]
     socket = runtime / "editor.sock"
@@ -183,6 +188,9 @@ def exercise(args, runtime, processes):
     source("10-command-undo", "")
     capture("10-command-undo", lambda im: body(im) == body(initial))
     assert path.read_bytes() == original, "editing saved the disk fixture"
+    if args.completion_ledger:
+        from wayland_completion import exercise_completion
+        exercise_completion(path, run, key, shot, wait_for)
     if args.build_baseline:
         from wayland_build import build_panel
         build_panel(path, out, run, key, shot, pane, args.ocr_language,
@@ -199,6 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpui", type=Path, required=True)
     fixtures = parser.add_mutually_exclusive_group()
     fixtures.add_argument("--build-baseline", type=Path, help="also exercise the build panel using proj/tally and rig/vpointer.py from this baseline directory")
+    fixtures.add_argument("--completion-ledger", type=Path, help="check prefix-anchored completion on a disposable copy of the ledger at two scales")
     fixtures.add_argument("--selection-baseline", type=Path, help="compare source gestures on the baseline ledger and Unicode fixture using rig/vpointer.py")
     parser.add_argument("--stock", action="store_true", help="run the selection comparison with the shipped GUI")
     parser.add_argument("--ocr-language", default="eng", help="installed Tesseract language for build output")

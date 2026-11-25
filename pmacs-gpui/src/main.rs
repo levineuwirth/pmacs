@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod completion;
 mod document;
 mod input;
 mod palette;
@@ -44,6 +45,7 @@ struct FileView {
     source_drag: Option<(gpui::Point<gpui::Pixels>, u64)>,
     panel: panel::Panel,
     prompt: Option<Prompt>,
+    completion: Option<completion::Completion>,
     prompt_scroll: UniformListScrollHandle,
     status: Option<String>,
 }
@@ -84,6 +86,7 @@ impl FileView {
                     self.source_scroll = UniformListScrollHandle::new();
                 }
                 self.viewport = None;
+                self.completion = None;
                 self.painted = Default::default();
                 self.source_drag = None;
                 self.selection = Default::default();
@@ -96,6 +99,22 @@ impl FileView {
                 ..
             } if buffer_id == self.id => {
                 return Ok(self.selection.apply(full, segments));
+            }
+            InstanceMessage::CompletionPopup {
+                buffer_id,
+                anchor,
+                rows,
+                selected,
+                ..
+            } if buffer_id == self.id => {
+                self.completion =
+                    anchor
+                        .filter(|_| !rows.is_empty())
+                        .map(|anchor| completion::Completion {
+                            anchor,
+                            rows,
+                            selected,
+                        });
             }
             InstanceMessage::CursorByte {
                 buffer_id,
@@ -295,11 +314,11 @@ impl gpui::UniformListDecoration for SourceViewport {
     fn compute(
         &self,
         rows: std::ops::Range<usize>,
-        _: Bounds<gpui::Pixels>,
+        bounds: Bounds<gpui::Pixels>,
         _: gpui::Point<gpui::Pixels>,
         _: gpui::Pixels,
         _: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut gpui::App,
     ) -> gpui::AnyElement {
         self.0.update(cx, |view, cx| {
@@ -321,8 +340,19 @@ impl gpui::UniformListDecoration for SourceViewport {
                     }
                 }
             }
-        });
-        div().into_any_element()
+            let anchor = view.painted.take_completion_anchor();
+            if view.prompt.is_none()
+                && !view.panel.focused()
+                && view.notice.is_none()
+                && window.is_window_active()
+                && let (Some(popup), Some(anchor)) = (&view.completion, anchor)
+                && let Some(element) =
+                    popup.show(anchor, window.content_mask().bounds, bounds.origin)
+            {
+                return element.into_any_element();
+            }
+            div().into_any_element()
+        })
     }
 }
 
@@ -401,7 +431,13 @@ impl Render for FileView {
                                         .text_color(rgb(0x827f79))
                                         .child((index + 1).to_string()),
                                 )
-                                .child(this.painted.row(line, start, cursor, &this.selection))
+                                .child(this.painted.row(
+                                    line,
+                                    start,
+                                    cursor,
+                                    &this.selection,
+                                    this.completion.as_ref().map(|p| p.anchor),
+                                ))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -538,6 +574,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let launch_result = std::rc::Rc::new(std::cell::RefCell::new(None));
     let launch = launch_result.clone();
     Application::new().run(move |cx| {
+        gpui_component::init(cx);
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+        let theme = gpui_component::Theme::global_mut(cx);
+        theme.list_active = rgb(0x3c3b38).into();
+        theme.list_active_border = rgb(0x58554f).into();
+        theme.list_hover = rgb(0x30302e).into();
         if let Err(error) = cx.text_system().add_fonts(vec![SOURCE_FONT.into()]) {
             *launch.borrow_mut() = Some(format!("could not load JetBrains Mono: {error}"));
             cx.quit();
@@ -591,6 +633,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         source_drag: None,
                         panel: panel::Panel::new(client_version),
                         prompt: None,
+                        completion: None,
                         prompt_scroll: UniformListScrollHandle::new(),
                         status: None,
                     };

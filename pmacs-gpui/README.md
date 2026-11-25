@@ -78,3 +78,14 @@ The trial pins the published GPUI 0.2.2 crate. Revisit the dependency when the
 [standalone upstream](https://github.com/zed-industries/gpui) publishes a
 buildable release. Run the native editing, panel, selection and scale checks
 against the candidate before changing the pin.
+
+In-buffer completion appears at the start of the typed prefix. Keep typing
+to narrow the list, use Ctrl-n or Ctrl-p to change the selection, Tab or
+Enter to accept, and Escape to dismiss. At the end of the trial ledger,
+type `format_ce` and press Tab for `format_cents`. One Ctrl-/ undoes the
+acceptance. Use `M-x completion.at-point` to request candidates explicitly.
+
+The palette and completion popup use the same GPUI Component 0.5.1 list
+row on the pinned GPUI 0.2.2. To run the native two-scale placement and
+editing regression, pass `--completion-ledger /path/to/tally/src/ledger.rs`
+to `wayland_editing.py`. The test copies the file into a private session.
