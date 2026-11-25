@@ -3773,6 +3773,39 @@ impl EditorState {
             .display_to_pos(buf, target, core.layout_ctx(win_id))
     }
 
+    /// Deliver a completed click only while the pressed document window and
+    /// the point placed by that press are still current for this frontend.
+    pub(crate) fn panel_click(
+        &mut self,
+        source: FrontendId,
+        record: &crate::semantic_render::AcceptedPanelGesture,
+        coord: CellCoord,
+        mods: pmacs_protocol::Modifiers,
+    ) {
+        let PanelGestureDomain::Document { window } = record.domain else {
+            return;
+        };
+        if !record.plain_click || !mods.is_empty() || record.coord != coord {
+            return;
+        }
+        let Some(byte) = self.panel_cell_byte(window, coord) else {
+            return;
+        };
+        let core = self.core.borrow();
+        if core.active_frontend != source
+            || core.active_window_id() != window
+            || core.windows[&window].cursor != byte
+            || core.active_region().is_some()
+            || core.menu_is_open()
+            || core.minibuffer.is_active()
+        {
+            return;
+        }
+        drop(core);
+        self.lua_host
+            .run_hook("window.panel-click", mlua::MultiValue::new());
+    }
+
     /// Move ONE window's point, never the ambient active window's.
     fn panel_set_cursor(&self, win_id: WindowId, byte: u64) {
         let mut core = self.core.borrow_mut();

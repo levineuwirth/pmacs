@@ -2624,6 +2624,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pmacs-attach-client"
+version = "0.1.0"
+dependencies = [
+ "pmacs-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "pmacs-gpu"
 version = "2.0.0"
 dependencies = [
@@ -2632,6 +2640,7 @@ dependencies = [
  "glyphon",
  "loro",
  "pmacs",
+ "pmacs-attach-client",
  "pmacs-protocol",
  "pollster",
  "sys-locale",

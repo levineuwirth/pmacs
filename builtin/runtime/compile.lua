@@ -24,6 +24,14 @@ pmacs.compile = pmacs.compile or {}
 pmacs.shell = pmacs.shell or {}
 pmacs.errors = pmacs.errors or {}
 
+pmacs.config.define {
+  name = "compile.click-to-visit",
+  description = "Visit a parsed source location when its output row is clicked in a graphical panel.",
+  type = "boolean",
+  default = false,
+  mutability = "live",
+}
+
 local COMPILATION = "*compilation*"
 local SHELL_OUT = "*shell-command*"
 local SEARCH_RESULTS = "*search-results*"
@@ -582,6 +590,12 @@ local function parse_line(slot, line, abs_start)
         if style and slot.overlay then
           slot.overlay:add(abs_start, abs_start + #line, style)
         end
+        if slot.overlay then
+          local first, last = line:find(file, 1, true)
+          if first and last then
+            slot.overlay:add(abs_start + first - 1, abs_start + last, { underline = "single" })
+          end
+        end
         return
       end
       -- Fail-closed match: fall through to later rules.
@@ -1061,20 +1075,28 @@ local function entry_on_row(slot, row)
   return nil
 end
 
+local function visit_cursor_error(report_missing)
+  local slot = slot_for_buffer(pmacs.window.buffer())
+  if not slot or not check_rev(slot) then return false end
+  local idx = entry_on_row(slot, pmacs.editor.cursor_line())
+  if idx then
+    visit_error(slot, idx)
+    return true
+  end
+  if report_missing then pmacs.editor.set_status("no error on this line") end
+  return false
+end
+
+pmacs.hook.add("window.panel-click", function()
+  if pmacs.config.get("compile.click-to-visit") and visit_cursor_error(false) then
+    return false
+  end
+end)
+
 pmacs.command.define {
   name = "compile.visit-error",
   description = "Visit the error location on the current line of a compile/shell buffer.",
-  fn = function()
-    local slot = slot_for_buffer(pmacs.window.buffer())
-    if not slot then return end
-    if not check_rev(slot) then return end
-    local idx = entry_on_row(slot, pmacs.editor.cursor_line())
-    if not idx then
-      pmacs.editor.set_status("no error on this line")
-      return
-    end
-    visit_error(slot, idx)
-  end,
+  fn = function() visit_cursor_error(true) end,
 }
 
 local function move_to_row(row)

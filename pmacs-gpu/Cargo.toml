@@ -48,6 +48,7 @@ similar_names = "allow"
 multiple_crate_versions = "allow"
 
 [dependencies]
+pmacs-attach-client = { path = "../pmacs-attach-client" }
 # OpenType MATH table reader for inline math layout (Q#MS7). Already in the
 # build graph via fontdb -> cosmic-text -> glyphon, so this declares a crate
 # the build compiles anyway. The feature set is a SUBSET of fontdb's; a bare

@@ -1336,7 +1336,10 @@ fn replay_panel_pointer(
                 return;
             };
             if let Some(state) = semantic.as_deref_mut() {
+                let plain_click =
+                    mods.is_empty() && state.panel_mapping_generation_peek().is_some();
                 state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
+                    plain_click,
                     button: MouseButton::Left,
                     coord,
                     buffer_id,
@@ -1345,6 +1348,9 @@ fn replay_panel_pointer(
             }
         }
         MouseKind::Drag(MouseButton::Left) => {
+            if let Some(state) = semantic.as_deref_mut() {
+                state.disarm_panel_click();
+            }
             if outcome != Outcome::Accepted || !live {
                 // Stale tail, or a drag over chrome: inert. Any live
                 // record is retained rather than advanced, because the
@@ -1395,6 +1401,7 @@ fn replay_panel_pointer(
                             kind,
                             mods,
                         );
+                        editor.panel_click(source, &record, coord, mods);
                     }
                 }
                 Outcome::Consumed => {
@@ -8704,6 +8711,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn panel_click_requires_a_plain_completed_gesture_on_the_current_mapping() {
+        use pmacs_protocol::{Modifiers, MouseButton::Left, MouseKind};
+
+        let fid = FrontendId(810);
+        let (mut editor, mut states, mut render, doc, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&states, fid);
+        editor.lua_host.lua().load(
+            "clicks = 0; pmacs.hook.add('window.panel-click', function() clicks = clicks + 1 end)",
+        ).exec().unwrap();
+
+        let mut send = |editor: &mut crate::editor::EditorState, kind, mods| {
+            let event = FrontendEvent::PanelPointerMapped {
+                frontend_id: fid,
+                geometry_epoch: epochs.0,
+                panel_epoch: epochs.1,
+                buffer_id: buffer,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind,
+                mods,
+                mapping_generation: generation,
+            };
+            dispatch_panel_event(
+                editor,
+                fid,
+                PROTOCOL_VERSION,
+                &mut states,
+                &mut render,
+                event,
+            );
+        };
+        let down = MouseKind::Down(Left);
+        let up = MouseKind::Up(Left);
+        let clicks = |editor: &crate::editor::EditorState| {
+            editor
+                .lua_host
+                .lua()
+                .globals()
+                .get::<u32>("clicks")
+                .unwrap()
+        };
+        send(&mut editor, down, Modifiers::NONE);
+        assert_eq!(clicks(&editor), 0, "the press alone cannot visit");
+        send(&mut editor, up, Modifiers::NONE);
+        assert_eq!(clicks(&editor), 1);
+
+        send(&mut editor, down, Modifiers::SHIFT);
+        send(&mut editor, up, Modifiers::NONE);
+        send(&mut editor, down, Modifiers::NONE);
+        send(&mut editor, MouseKind::Drag(Left), Modifiers::NONE);
+        send(&mut editor, up, Modifiers::NONE);
+        send(&mut editor, down, Modifiers::NONE);
+        editor.core.borrow_mut().focus_window(fid, doc);
+        send(&mut editor, up, Modifiers::NONE);
+        send(&mut editor, down, Modifiers::NONE);
+        foreign_edit(&editor, buffer, b"replacement diagnostic");
+        send(&mut editor, up, Modifiers::NONE);
+        assert_eq!(
+            clicks(&editor),
+            1,
+            "modified, dragged, unfocused and stale releases cannot visit"
+        );
+    }
+
     /// §5b G6a — **legacy OUTBOUND**: a v24 peer receives exactly
     /// `Present`, never the mapped family.
     #[test]
@@ -9450,6 +9523,7 @@ mod tests {
         );
         states_a.get_mut(&fid_b).expect("B").arm_accepted_gesture(
             crate::semantic_render::AcceptedPanelGesture {
+                plain_click: false,
                 button: pmacs_protocol::MouseButton::Left,
                 coord: pmacs_protocol::CellCoord::new(0, 0),
                 buffer_id: buffer_a,

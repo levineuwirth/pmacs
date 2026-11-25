@@ -1,0 +1,2244 @@
+//! Semantic frontend transport for attaching to a pmacs daemon over a Unix socket.
+//! Handshake and target bootstrap finish before decoded events reach the caller's sink.
+
+#![forbid(unsafe_code)]
+
+pub mod cell_grid;
+
+use std::collections::VecDeque;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use pmacs_protocol::{
+    AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
+    FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
+    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SESSION_MIN_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionBootstrapRequest, SessionToken, TransportError,
+    is_supported_protocol_version, read_message, requested_protocol_version, write_message,
+};
+
+/// Private root-broker target operands, kept as exact Unix paths until the
+/// protocol-v20 bootstrap frame is serialized.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitialTargetPaths {
+    /// Absolute launcher working directory.
+    pub cwd: PathBuf,
+    /// Launcher-expanded target path.
+    pub path: PathBuf,
+}
+
+/// Errors the attach client surfaces. Kept narrow on purpose: the
+/// hello-world fallback is the right recovery for any of these in
+/// session 3, so the caller's only job is to log + drop back to the
+/// inert renderer.
+#[derive(Debug)]
+pub enum AttachClientError {
+    /// Couldn't open the Unix socket.
+    Connect(std::io::Error),
+    /// Transport framing failed during the handshake.
+    Handshake(TransportError),
+    /// Server's `protocol_version` is outside `SUPPORTED_PROTOCOL_VERSIONS`.
+    VersionMismatch { server: u32, client: u32 },
+    /// The daemon's `Hello.instance_capabilities` doesn't advertise a
+    /// capability a semantic frontend needs (audit F-003). Most commonly
+    /// the daemon was built without `--features crdt`, so `crdt_replica`
+    /// / `semantic_render` are `false`: negotiation would "succeed" but no
+    /// `BufferSnapshot` ever arrives and the window sits on
+    /// `(connecting...)` forever. We reject up front instead.
+    CapabilityMismatch { missing: Vec<&'static str> },
+    /// The requested target requires the protocol-v20 bootstrap envelope.
+    InitialTargetUnsupported { server: u32 },
+    /// The daemon rejected the target before a window was created.
+    InitialTargetFailed { path: PathBuf, message: String },
+    /// The daemon violated the target bootstrap ordering contract.
+    InitialTargetProtocol(String),
+}
+
+impl AttachClientError {
+    /// A short, actionable line to render *in the window* (the user may
+    /// never see stderr). The `Display` impl carries the full detail for
+    /// logs; this is the one-liner for the failed-attach placeholder.
+    pub fn window_status(&self) -> String {
+        match self {
+            Self::CapabilityMismatch { .. } => {
+                "daemon lacks CRDT support — restart it built with `--features crdt`".to_owned()
+            }
+            _ => "(attach failed; see stderr)".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for AttachClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(e) => write!(f, "connect to daemon socket failed: {e}"),
+            Self::Handshake(e) => write!(f, "attach handshake failed: {e}"),
+            Self::VersionMismatch { server, client } => write!(
+                f,
+                "daemon protocol version {server} not in client's supported set (this client = \
+                 {client}, supports {SUPPORTED_PROTOCOL_VERSIONS:?})"
+            ),
+            Self::CapabilityMismatch { missing } => write!(
+                f,
+                "daemon does not advertise required capabilities {missing:?} — start the daemon \
+                 built with the `crdt` feature (it advertises `crdt_replica` / `semantic_render` \
+                 only on CRDT builds; without them no BufferSnapshot is ever sent)"
+            ),
+            Self::InitialTargetUnsupported { server } => write!(
+                f,
+                "initial target requires daemon protocol v20, but the live daemon speaks v{server}"
+            ),
+            Self::InitialTargetFailed { path, message } => {
+                write!(
+                    f,
+                    "could not open initial target {}: {message}",
+                    path.display()
+                )
+            }
+            Self::InitialTargetProtocol(message) => {
+                write!(f, "invalid initial-target bootstrap: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttachClientError {}
+
+/// Failure while connecting the managed GPU path.
+#[derive(Debug)]
+pub enum ManagedAttachError {
+    /// The daemon connection reached the normal attach client and failed.
+    Attach(AttachClientError),
+    /// A refused socket path exists but is not a Unix socket.
+    NonSocketPath(PathBuf),
+    /// Inspecting a refused socket path failed.
+    InspectSocket {
+        /// Path whose entry type could not be inspected.
+        path: PathBuf,
+        /// Filesystem error from `metadata`.
+        source: io::Error,
+    },
+    /// The requested daemon executable could not be started.
+    SpawnDaemon {
+        /// Executable supplied by the root broker.
+        executable: PathBuf,
+        /// Process-spawn failure.
+        source: io::Error,
+    },
+    /// No attachable daemon appeared before the bounded deadline.
+    StartupTimeout {
+        /// Socket path that remained unreachable.
+        socket: PathBuf,
+        /// Most recent connect error.
+        connect: io::Error,
+        /// Observed daemon process outcome, when it exited early.
+        daemon_status: Option<String>,
+        /// Startup deadline used for this attempt.
+        timeout: Duration,
+        /// Where the spawned daemon's stderr was captured (E2.4), so a
+        /// daemon that printed why it could not start can be read.
+        stderr_log: Option<PathBuf>,
+    },
+}
+
+pub use pmacs_protocol::socket_file::{daemon_stderr_path, open_daemon_stderr};
+
+impl std::fmt::Display for ManagedAttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Attach(error) => error.fmt(f),
+            Self::NonSocketPath(path) => write!(
+                f,
+                "refusing to start a daemon: socket path {} exists and is not a Unix socket",
+                path.display()
+            ),
+            Self::InspectSocket { path, source } => write!(
+                f,
+                "cannot inspect refused socket path {}: {source}",
+                path.display()
+            ),
+            Self::SpawnDaemon { executable, source } => write!(
+                f,
+                "could not start daemon executable {}: {source}",
+                executable.display()
+            ),
+            Self::StartupTimeout {
+                socket,
+                connect,
+                daemon_status,
+                timeout,
+                stderr_log,
+            } => {
+                write!(
+                    f,
+                    "daemon did not become attachable on {} within {timeout:?}: {connect}",
+                    socket.display()
+                )?;
+                if let Some(status) = daemon_status {
+                    write!(f, " (spawned daemon {status})")?;
+                }
+                if let Some(log) = stderr_log {
+                    write!(f, "; the daemon's stderr is in {}", log.display())?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedAttachError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Attach(error) => Some(error),
+            Self::InspectSocket { source, .. }
+            | Self::SpawnDaemon { source, .. }
+            | Self::StartupTimeout {
+                connect: source, ..
+            } => Some(source),
+            Self::NonSocketPath(_) => None,
+        }
+    }
+}
+
+impl From<AttachClientError> for ManagedAttachError {
+    fn from(error: AttachClientError) -> Self {
+        Self::Attach(error)
+    }
+}
+
+#[derive(Debug, Default)]
+struct DaemonProcessState {
+    reaped: bool,
+    wait_result: Option<String>,
+}
+
+/// Observable process facts for a daemon started by managed attach.
+#[derive(Clone, Debug)]
+pub struct ManagedDaemonFacts {
+    spawned: bool,
+    pid: Option<u32>,
+    state: Arc<Mutex<DaemonProcessState>>,
+}
+
+impl ManagedDaemonFacts {
+    fn existing() -> Self {
+        Self {
+            spawned: false,
+            pid: None,
+            state: Arc::new(Mutex::new(DaemonProcessState::default())),
+        }
+    }
+
+    fn spawned(pid: u32) -> Self {
+        Self {
+            spawned: true,
+            pid: Some(pid),
+            state: Arc::new(Mutex::new(DaemonProcessState::default())),
+        }
+    }
+
+    fn record_wait(&self, result: String) {
+        let mut state = self.state.lock().expect("managed daemon state lock");
+        state.reaped = true;
+        state.wait_result = Some(result);
+    }
+
+    /// Whether this invocation started a daemon process.
+    pub fn spawned_daemon(&self) -> bool {
+        self.spawned
+    }
+
+    /// Process ID of the daemon this invocation started.
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Whether the started child has been observed with `wait`.
+    pub fn daemon_reaped(&self) -> bool {
+        self.state.lock().expect("managed daemon state lock").reaped
+    }
+
+    /// Recorded `wait` result for a completed child.
+    pub fn daemon_wait_result(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("managed daemon state lock")
+            .wait_result
+            .clone()
+    }
+}
+
+/// A successful attach plus lifecycle facts for any daemon it started.
+pub struct ManagedAttach {
+    /// Connected semantic attach client.
+    pub client: AttachClient,
+    /// Shared facts updated by the daemon child reaper.
+    pub daemon: ManagedDaemonFacts,
+}
+
+/// The capabilities a semantic `pmacs-gpu` frontend requires the daemon to
+/// advertise in `Hello.instance_capabilities`, and which of them this
+/// daemon is missing (audit F-003). Empty ⇒ the attach can proceed.
+fn missing_capabilities(caps: &pmacs_protocol::InstanceCapabilities) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !caps.multi_frontend {
+        missing.push("multi_frontend");
+    }
+    if !caps.crdt_replica {
+        missing.push("crdt_replica");
+    }
+    if !caps.semantic_render {
+        missing.push("semantic_render");
+    }
+    missing
+}
+
+/// One decoded event forwarded from the reader thread to the main
+/// loop. `Message` carries the entire `InstanceMessage`; `Disconnected`
+/// fires once when the reader thread exits (clean EOF or transport
+/// error — both look identical from the main thread's perspective).
+#[derive(Debug)]
+pub enum AttachEvent {
+    /// A decoded message frame from the daemon.
+    Message(Box<InstanceMessage>),
+    /// The reader thread exited. Includes the disconnect reason for
+    /// logging on the main thread.
+    Disconnected(String),
+}
+
+/// Hard cap on queued **lossless** outbound events (audit F-008). A
+/// daemon so stalled that this many keys / CRDT ops / pastes pile up is
+/// effectively dead; past it we fail fast (see [`Outbox::enqueue`]) rather
+/// than grow memory without bound. Coalesceable events (viewport / drag)
+/// never count against it — they collapse into the queue tail. 8192 is far
+/// above any human-paced burst, so it only trips on a genuine stall.
+const OUTBOX_MAX: usize = 8192;
+
+/// The kind tag of the two high-frequency events coalesced by
+/// tail-replacement (F-008): scroll `Viewport`s and `Pointer` **drags**.
+/// `None` marks a *lossless* event — `Key`, `CrdtOp`, `Paste`,
+/// `MenuPointer`, and the discrete pointer clicks (`Down` / `Up` /
+/// `DoubleDown` / `TripleDown` / `Context`) — which are ordered and never
+/// dropped. Coalescing a drag is safe only against a *same-kind tail*, so
+/// a `Down, Drag, Drag, Up` gesture keeps its `Down`/`Up` ordering.
+fn coalesce_kind(event: &FrontendEvent) -> Option<u8> {
+    match event {
+        FrontendEvent::Viewport { .. } => Some(0),
+        FrontendEvent::Pointer {
+            kind: PointerKind::Drag,
+            ..
+        } => Some(1),
+        // Vterm Stage 3 — terminal pointer MOVE and DRAG are the
+        // high-frequency terminal gestures and coalesce like their
+        // document twin. Press, release, and wheel stay lossless:
+        // collapsing a wheel run would silently lose scroll distance,
+        // and collapsing a press/release would break selection.
+        FrontendEvent::TerminalPointer {
+            kind: MouseKind::Move,
+            ..
+        } => Some(2),
+        FrontendEvent::TerminalPointer {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(3),
+        // Bottom panel Stage 2B-3 (framing §5.2) — four more tail-only
+        // tags, each with its own reason.
+        //
+        // Geometry is latest-wins because epochs need only INCREASE, not
+        // be consecutive: the daemon accepts a jump from 3 to 7 and the
+        // dropped declarations described geometry that no longer exists.
+        FrontendEvent::FrontendCellGeometry { .. } => Some(4),
+        // A resize drag coalesces over the complete event including its
+        // epochs, so a collapsed run cannot mix a new row count with an
+        // old presentation identity.
+        FrontendEvent::PanelResizeRows { .. } => Some(5),
+        // Panel move and drag mirror their terminal twins. Down / Up /
+        // wheel / context stay LOSSLESS and ordered: repeated left Downs
+        // are what the daemon's click state reads as a multi-click, and
+        // Down(Right) is the context-menu gesture, so collapsing either
+        // silently changes the gesture's meaning.
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Move,
+            ..
+        } => Some(6),
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(7),
+        // §5b G13a — the v25 mapped family needs its OWN tags. Falling
+        // through to `None` would make pixel-rate mapped motion lossless
+        // and fill the bounded queue, which is `OUTBOX_MAX` events of
+        // hover before the socket closes.
+        //
+        // Tail-replacement takes the whole newer event, so the surviving
+        // event carries the latest coordinate AND the latest
+        // `mapping_generation` together — a collapsed run can never pair
+        // a new coordinate with a stale generation.
+        //
+        // Distinct from the legacy tags 6/7 rather than shared with
+        // them. A session negotiates one family and never mixes the two,
+        // so sharing would buy nothing and would let a family confusion
+        // collapse silently instead of showing up as two queued events.
+        FrontendEvent::PanelPointerMapped {
+            kind: MouseKind::Move,
+            ..
+        } => Some(8),
+        FrontendEvent::PanelPointerMapped {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(9),
+        _ => None,
+    }
+}
+
+/// Bounded, coalescing outbound queue drained by the writer thread
+/// (audit F-008). Replaces the previous unbounded `mpsc::channel`, which
+/// let a stalled daemon grow memory without limit and replay a backlog of
+/// stale viewport/pointer traffic on recovery.
+struct Outbox {
+    queue: VecDeque<FrontendEvent>,
+    /// Set once the writer gives up (socket error) or a lossless overflow
+    /// trips fail-fast. Further [`Outbox::enqueue`] calls return `false`.
+    closed: bool,
+    /// E10z.2 --- the events this session has put in the queue, each
+    /// once: an event that replaces the tail it coalesces with is the
+    /// same event on the wire, and a refused one is none. The daemon
+    /// counts the events it takes up from the socket the same way
+    /// (`InstanceMessage::InputHandled`), so the two meet once everything
+    /// queued has been handled.
+    appended: u64,
+}
+
+impl Outbox {
+    fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            closed: false,
+            appended: 0,
+        }
+    }
+
+    /// Apply the F-008 enqueue policy. Returns `false` when the event
+    /// can't be accepted — the outbox is `closed`, or a lossless append
+    /// would exceed [`OUTBOX_MAX`] (which also *sets* `closed`: a clean
+    /// disconnect → reconnect → fresh snapshot is more correct than
+    /// silently dropping a `CrdtOp` and desyncing the optimistic replica).
+    ///
+    /// A coalesceable event (viewport / drag) whose kind matches the queue
+    /// **tail** *replaces* it — collapsing a scroll or drag flood to O(1)
+    /// without reordering across an intervening click or key.
+    fn enqueue(&mut self, event: FrontendEvent) -> bool {
+        if self.closed {
+            return false;
+        }
+        if let Some(kind) = coalesce_kind(&event)
+            && self.queue.back().and_then(coalesce_kind) == Some(kind)
+        {
+            *self
+                .queue
+                .back_mut()
+                .expect("tail present when back() matched") = event;
+            return true;
+        }
+        if self.queue.len() >= OUTBOX_MAX {
+            self.closed = true;
+            return false;
+        }
+        self.queue.push_back(event);
+        self.appended += 1;
+        true
+    }
+}
+
+/// Connect, handshake, and spawn the reader thread.
+///
+/// Returns once the handshake has completed and the reader thread is
+/// running. The reader thread owns the read half of the stream; a
+/// writer thread owns the write half. The returned [`AttachClient`]
+/// queues outbound `FrontendEvent`s so the winit UI thread never blocks
+/// on daemon socket backpressure.
+///
+/// **Initial window size note** — `AttachRequest::initial_size` is
+/// nominally a `CellSize` (rows × cols) anchored to the TUI. The
+/// `pmacs-gpu` window isn't a cell grid; we send a placeholder of the
+/// approximate cell count for the initial 800×200 window so the
+/// daemon's initial render makes plausible space for content. This
+/// is a small finding for session 3's audit (the wire-shape detail
+/// "`AttachRequest`'s `CellSize` assumes a grid frontend"); resolution
+/// classified under rule (iii) as deferred — a structural answer
+/// belongs with Q#2's minimap variant or its own protocol thread,
+/// not session 3's attach loop.
+fn read_initial_target_bootstrap(
+    stream: &mut UnixStream,
+    display_path: PathBuf,
+) -> Result<InstanceMessage, AttachClientError> {
+    let mut snapshot = None;
+    loop {
+        let message: InstanceMessage =
+            read_message(stream).map_err(AttachClientError::Handshake)?;
+        match message {
+            candidate @ InstanceMessage::BufferSnapshot { .. } if snapshot.is_none() => {
+                snapshot = Some(candidate);
+            }
+            InstanceMessage::BufferSnapshot { .. } => {
+                return Err(AttachClientError::InitialTargetProtocol(
+                    "received more than one target snapshot".to_owned(),
+                ));
+            }
+            InstanceMessage::InitialTargetResult(InitialTargetResult::Opened { buffer_id }) => {
+                let Some(snapshot) = snapshot else {
+                    return Err(AttachClientError::InitialTargetProtocol(
+                        "Opened arrived before BufferSnapshot".to_owned(),
+                    ));
+                };
+                let InstanceMessage::BufferSnapshot {
+                    buffer_id: snapshot_buffer,
+                    ..
+                } = snapshot
+                else {
+                    unreachable!("bootstrap snapshot variant checked above");
+                };
+                if snapshot_buffer != buffer_id {
+                    return Err(AttachClientError::InitialTargetProtocol(format!(
+                        "Opened named {buffer_id:?}, snapshot named {snapshot_buffer:?}"
+                    )));
+                }
+                return Ok(snapshot);
+            }
+            InstanceMessage::InitialTargetResult(InitialTargetResult::Failed { message }) => {
+                return Err(AttachClientError::InitialTargetFailed {
+                    path: display_path,
+                    message,
+                });
+            }
+            InstanceMessage::Goodbye(reason) => {
+                return Err(AttachClientError::InitialTargetProtocol(format!(
+                    "daemon closed bootstrap: {reason:?}"
+                )));
+            }
+            other => {
+                return Err(AttachClientError::InitialTargetProtocol(format!(
+                    "unexpected {} before target readiness",
+                    instance_message_label(&other)
+                )));
+            }
+        }
+    }
+}
+
+/// [`connect_with_sink`], with the decoded-message destination left to the caller.
+///
+/// The winit path forwards to the event loop; the headless probe used by
+/// the Stage 3 acceptance forwards to a channel. Both drive the SAME
+/// handshake, capability gate, reader, writer, and outbox — a probe that
+/// reimplemented any of that would prove nothing about the real client.
+///
+/// `sink` returns `false` when its destination is gone, which stops the
+/// reader thread.
+pub fn connect_with_sink(
+    socket_path: &Path,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink_resuming(socket_path, None, sink)
+}
+
+/// [`connect_with_sink`] presenting `resume` in the v27 `Resume` step
+/// (E9); see [`connect_with_sink_resuming`].
+pub fn connect_with_sink_resuming(
+    socket_path: &Path,
+    resume: Option<SessionToken>,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
+    connect_stream_with_sink(stream, "pmacs-gpu", None, resume, sink)
+}
+
+/// [`connect_with_sink`] carrying an initial target, so the daemon opens
+/// the file at attach as it does for `pmacs --gpu <file>`; the opened
+/// buffer's snapshot is the client's initial message. The latency
+/// probe's cold case (E6d.3) attaches this way.
+pub fn connect_with_target_and_sink(
+    socket_path: &Path,
+    frontend_kind: &'static str,
+    initial_target: InitialTargetPaths,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
+    connect_stream_with_sink(stream, frontend_kind, Some(initial_target), None, sink)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the synchronous handshake and thread startup remain one ordered transport transaction"
+)]
+/// Negotiate a session on an already connected Unix stream, sending decoded
+/// messages to the caller's event loop.
+pub fn connect_stream_with_sink(
+    stream: UnixStream,
+    frontend_kind: &'static str,
+    initial_target: Option<InitialTargetPaths>,
+    resume: Option<SessionToken>,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    // Hello round-trip.
+    let mut handshake_stream = stream.try_clone().map_err(AttachClientError::Connect)?;
+    let hello: Hello = read_message(&mut handshake_stream).map_err(AttachClientError::Handshake)?;
+    if !is_supported_protocol_version(hello.protocol_version) {
+        return Err(AttachClientError::VersionMismatch {
+            server: hello.protocol_version,
+            client: PROTOCOL_VERSION,
+        });
+    }
+    eprintln!(
+        "{frontend_kind}: attached to daemon (protocol v{}, instance pmacs {})",
+        hello.protocol_version, hello.instance_identity.pmacs_version
+    );
+
+    // Capability gate (audit F-003). The daemon advertises what it can do
+    // in `Hello.instance_capabilities`; a semantic frontend needs
+    // `multi_frontend` + `crdt_replica` + `semantic_render`. A daemon
+    // built without `--features crdt` advertises those as `false`: the
+    // handshake would otherwise "succeed", but no `BufferSnapshot` ever
+    // arrives and the window sits on `(connecting...)` forever. Reject up
+    // front with an actionable error rather than hanging silently. No
+    // `AttachResponse` round-trip is needed — the daemon already told us
+    // in `Hello`; we just have to check it against what we require.
+    let missing = missing_capabilities(&hello.instance_capabilities);
+    if !missing.is_empty() {
+        return Err(AttachClientError::CapabilityMismatch { missing });
+    }
+
+    if initial_target.is_some() && hello.protocol_version < 20 {
+        return Err(AttachClientError::InitialTargetUnsupported {
+            server: hello.protocol_version,
+        });
+    }
+
+    // AttachRequest — declare the capabilities a semantic frontend
+    // needs. `multi_frontend` is included because the existing daemon
+    // gates `crdt_replica` behind it (M10.x dependency).
+    // Bottom-panel Stage 2B-3: the `Hello` version is a compatibility
+    // BASELINE, and this counter-offer is what activates anything above
+    // it. The handshake is server-first, so the daemon cannot advertise a
+    // version a shipped frontend might reject; the frontend is the only
+    // party that can safely name a higher one, because by this point it
+    // has already accepted the baseline. `requested_protocol_version`
+    // echoes anything older than the current baseline verbatim.
+    let session_protocol_version = requested_protocol_version(hello.protocol_version);
+    let req = AttachRequest {
+        protocol_version: session_protocol_version,
+        frontend_capabilities: FrontendCapabilities {
+            synchronized_output: false,
+            unicode_smp: true,
+            true_color: true,
+            mouse: false,
+            bracketed_paste: false,
+            terminal_kind: Some(frontend_kind.to_owned()),
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        },
+        // Placeholder — see the doc comment above. Cell-shaped initial
+        // size is awkward for a pixel frontend; for session 3 we send
+        // approximate dimensions so the daemon's initial-render
+        // ranging is plausible.
+        initial_size: pmacs_protocol::CellSize::new(24, 80),
+    };
+    write_message(&mut handshake_stream, &req).map_err(AttachClientError::Handshake)?;
+
+    let target_display_path = initial_target.as_ref().map(|target| target.path.clone());
+    if hello.protocol_version >= 20 {
+        let bootstrap = SessionBootstrapRequest {
+            initial_target: initial_target.map(|target| InitialTarget {
+                cwd: target.cwd.as_os_str().as_bytes().to_vec(),
+                path: target.path.as_os_str().as_bytes().to_vec(),
+            }),
+        };
+        write_message(&mut handshake_stream, &bootstrap).map_err(AttachClientError::Handshake)?;
+    }
+    // E9 (v27): the session's one handshake step past the bootstrap.
+    // Sent only to a session that negotiated the family, since the
+    // daemon reads it only from one; the token names the view the
+    // daemon retained for this window's previous session, or `None`.
+    if session_protocol_version >= SESSION_MIN_VERSION {
+        write_message(
+            &mut handshake_stream,
+            &FrontendEvent::Resume {
+                frontend_id: hello.assigned_frontend_id,
+                token: resume,
+            },
+        )
+        .map_err(AttachClientError::Handshake)?;
+    }
+    let initial_message = match target_display_path {
+        Some(path) => Some(read_initial_target_bootstrap(&mut handshake_stream, path)?),
+        None => None,
+    };
+
+    // Split read/write halves for the reader thread + writer thread.
+    // UnixStream clones share the underlying FD with independent
+    // buffer state — safe to read on one clone while the other writes
+    // (the FD is full-duplex).
+    let mut read_stream = stream.try_clone().map_err(AttachClientError::Connect)?;
+    // A third clone kept solely to *shut the socket down* (F-008). When the
+    // outbox closes — a lossless overflow, or a writer write error — we
+    // `shutdown(Both)` so the reader (blocked in `read_message` on its own
+    // clone) wakes with EOF and fires `Disconnected`. That routes the
+    // stall into the existing visible teardown instead of leaving the GPU
+    // showing locally-applied edits the daemon never received. Clones share
+    // the socket's file description, so a shutdown on any of them affects
+    // all — and it half-closes toward the daemon so it sees the departure.
+    let shutdown_handle = stream.try_clone().map_err(AttachClientError::Connect)?;
+    let write_stream = stream;
+    // Bounded, coalescing outbound queue (F-008) shared with the writer
+    // thread; the `Condvar` wakes the writer when the UI thread enqueues.
+    let outbox = Arc::new((Mutex::new(Outbox::new()), Condvar::new()));
+
+    // Reader thread. Each iteration: block on read_message, decode,
+    // forward via the event-loop proxy. Exits cleanly on EOF / any
+    // transport error; the main thread receives a single Disconnected
+    // event and drops back to the inert renderer.
+    thread::Builder::new()
+        .name("pmacs-gpu attach reader".into())
+        .spawn(move || {
+            loop {
+                match read_message::<InstanceMessage>(&mut read_stream) {
+                    Ok(msg) => {
+                        if !sink(AttachEvent::Message(Box::new(msg))) {
+                            // Destination torn down — quietly exit.
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        sink(AttachEvent::Disconnected(e.to_string()));
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("spawn attach reader thread");
+
+    // Writer thread. Socket writes can block when the daemon falls
+    // behind; doing them here keeps keyboard input, redraws, and
+    // message application off that backpressure path. It waits on the
+    // outbox condvar, takes the whole pending batch, and *releases the
+    // lock before* the blocking writes so the UI thread can keep
+    // enqueueing (and coalescing) meanwhile.
+    let writer_outbox = Arc::clone(&outbox);
+    let writer = thread::Builder::new()
+        .name("pmacs-gpu attach writer".into())
+        .spawn(move || {
+            let mut write_stream = write_stream;
+            let (lock, cvar) = &*writer_outbox;
+            loop {
+                let batch = {
+                    let mut ob = lock.lock().expect("outbox lock");
+                    while ob.queue.is_empty() && !ob.closed {
+                        ob = cvar.wait(ob).expect("outbox condvar wait");
+                    }
+                    if ob.queue.is_empty() && ob.closed {
+                        return;
+                    }
+                    std::mem::take(&mut ob.queue)
+                };
+                for event in batch {
+                    if let Err(e) = write_message(&mut write_stream, &event) {
+                        eprintln!("{frontend_kind}: attach writer stopped: {e}");
+                        lock.lock().expect("outbox lock").closed = true;
+                        // Wake the reader (and signal the daemon) so the
+                        // session tears down visibly (F-008) rather than
+                        // leaving the reader blocked on a dead socket.
+                        let _ = write_stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("spawn attach writer thread");
+
+    Ok(AttachClient {
+        outbox,
+        shutdown_handle,
+        frontend_id: hello.assigned_frontend_id,
+        session_protocol_version,
+        baseline_protocol_version: hello.protocol_version,
+        initial_message,
+        writer: Some(writer),
+    })
+}
+
+const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const MANAGED_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Managed attach with both a target and caller-provided event sink.
+pub fn connect_managed_with_target_and_sink(
+    socket_path: &Path,
+    daemon_executable: &Path,
+    initial_target: Option<InitialTargetPaths>,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<ManagedAttach, ManagedAttachError> {
+    connect_managed_inner(
+        socket_path,
+        daemon_executable,
+        |path| UnixStream::connect(path),
+        spawn_daemon,
+        MANAGED_STARTUP_TIMEOUT,
+        MANAGED_RETRY_INTERVAL,
+        initial_target,
+        sink,
+    )
+}
+
+fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
+    let mut command = Command::new(daemon_executable);
+    // E2.4 — stderr goes to a file the failure message names. A file
+    // that cannot be opened, a link there included, falls back to the null
+    // device rather than refusing the spawn: the daemon matters more than its log.
+    let stderr = match open_daemon_stderr(socket_path, "a window") {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    };
+    command
+        .arg("--daemon")
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr);
+    command.process_group(0);
+    command.spawn()
+}
+
+/// Whether a failed first connect authorizes starting a daemon: nothing
+/// at the path, or a socket file nothing answers (a daemon's leftover),
+/// does; a path that is not a socket is refused by name, never spawned
+/// over; any other failure fails closed. The verdict is read from the
+/// path (`pmacs_protocol::socket_file`), not the errno: Linux refuses a
+/// connect to a regular file with `ECONNREFUSED`, macOS with `ENOTSOCK`,
+/// and a split on the errno alone fell to the fail-closed arm there (E9
+/// review 1's High 1, the same shape as `pmacs --daemon --status`'s).
+fn initial_startup_authorized(
+    socket_path: &Path,
+    error: &io::Error,
+) -> Result<bool, ManagedAttachError> {
+    use pmacs_protocol::{ConnectFailure, classify_connect_failure};
+    match classify_connect_failure(socket_path, error) {
+        // Absent at the connect, or vanished between it and the look:
+        // a daemon's startup is what the path is waiting for. Any
+        // other errno on a path that is gone is still a failure of its
+        // own kind, and fails closed as it always did.
+        ConnectFailure::Missing => Ok(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        )),
+        ConnectFailure::Stale => Ok(true),
+        ConnectFailure::NotASocket => {
+            Err(ManagedAttachError::NonSocketPath(socket_path.to_owned()))
+        }
+        ConnectFailure::Other => Ok(false),
+        ConnectFailure::Inspect(source) => Err(ManagedAttachError::InspectSocket {
+            path: socket_path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn post_spawn_retryable(socket_path: &Path, error: &io::Error) -> Result<bool, ManagedAttachError> {
+    match error.kind() {
+        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => Ok(true),
+        _ => initial_startup_authorized(socket_path, error),
+    }
+}
+
+fn start_daemon_reaper(mut child: Child, facts: ManagedDaemonFacts) {
+    thread::Builder::new()
+        .name("pmacs-gpu daemon reaper".into())
+        .spawn(move || {
+            let result = match child.wait() {
+                Ok(status) => status.to_string(),
+                Err(error) => format!("wait failed: {error}"),
+            };
+            facts.record_wait(result);
+        })
+        .expect("spawn managed daemon reaper thread");
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "connector, spawner, timing, and sink stay injectable for deterministic lifecycle tests"
+)]
+fn connect_managed_inner<C, S, F>(
+    socket_path: &Path,
+    daemon_executable: &Path,
+    mut connector: C,
+    spawner: S,
+    timeout: Duration,
+    retry_interval: Duration,
+    initial_target: Option<InitialTargetPaths>,
+    sink: F,
+) -> Result<ManagedAttach, ManagedAttachError>
+where
+    C: FnMut(&Path) -> io::Result<UnixStream>,
+    S: FnOnce(&Path, &Path) -> io::Result<Child>,
+    F: Fn(AttachEvent) -> bool + Send + 'static,
+{
+    match connector(socket_path) {
+        Ok(stream) => {
+            let client = connect_stream_with_sink(stream, "pmacs-gpu", initial_target, None, sink)?;
+            return Ok(ManagedAttach {
+                client,
+                daemon: ManagedDaemonFacts::existing(),
+            });
+        }
+        Err(error) => {
+            if !initial_startup_authorized(socket_path, &error)? {
+                return Err(AttachClientError::Connect(error).into());
+            }
+        }
+    }
+
+    let child = spawner(daemon_executable, socket_path).map_err(|source| {
+        ManagedAttachError::SpawnDaemon {
+            executable: daemon_executable.to_owned(),
+            source,
+        }
+    })?;
+    let daemon = ManagedDaemonFacts::spawned(child.id());
+    start_daemon_reaper(child, daemon.clone());
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match connector(socket_path) {
+            Ok(stream) => {
+                let client =
+                    connect_stream_with_sink(stream, "pmacs-gpu", initial_target, None, sink)?;
+                return Ok(ManagedAttach { client, daemon });
+            }
+            Err(error) => {
+                let retryable = post_spawn_retryable(socket_path, &error)?;
+                if !retryable {
+                    return Err(AttachClientError::Connect(error).into());
+                }
+                if Instant::now() >= deadline {
+                    let daemon_status = daemon.daemon_wait_result();
+                    return Err(ManagedAttachError::StartupTimeout {
+                        socket: socket_path.to_owned(),
+                        connect: error,
+                        daemon_status,
+                        timeout,
+                        stderr_log: Some(daemon_stderr_path(socket_path)),
+                    });
+                }
+                thread::sleep(
+                    retry_interval.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+        }
+    }
+}
+
+/// Handle the main loop keeps after `connect` returns. It queues
+/// `FrontendEvent`s for the attach writer thread.
+pub struct AttachClient {
+    /// Bounded, coalescing outbound queue (F-008) drained by the writer
+    /// thread. `send_event` locks it, applies the enqueue policy, and
+    /// wakes the writer via the paired `Condvar`.
+    outbox: Arc<(Mutex<Outbox>, Condvar)>,
+    /// Socket clone used only to `shutdown(Both)` when the outbox closes
+    /// (F-008), so the reader wakes and the session tears down visibly
+    /// instead of diverging silently. See [`connect_with_sink`].
+    shutdown_handle: UnixStream,
+    /// Assigned by the daemon in the `Hello` response. Every
+    /// `FrontendEvent` carries this so the daemon can route input back
+    /// to the per-session `SemanticRenderState`.
+    frontend_id: FrontendId,
+    /// The version this session actually speaks: the frontend's
+    /// `AttachRequest` counter-offer, which the daemon adopts. Wire
+    /// variants newer than the session (e.g. `Pointer`, v5) must be gated
+    /// on this — a daemon below the variant's floor hard-errors decoding
+    /// an unknown discriminant.
+    ///
+    /// Bottom-panel Stage 2B-3: this is deliberately NOT
+    /// `Hello.protocol_version` any more. The server-first `Hello` carries
+    /// a compatibility *baseline* that no shipped frontend may be forced
+    /// to reject, so it under-reports what the pair can speak; the offer
+    /// this frontend made is the session's real ceiling.
+    session_protocol_version: u32,
+    /// The baseline the daemon advertised in its server-first `Hello`.
+    ///
+    /// Kept beside the negotiated version because they answer different
+    /// questions, and because "the daemon still advertises 20 while this
+    /// session runs 21" is precisely the compatibility property Stage
+    /// 2B-3 has to be able to demonstrate.
+    baseline_protocol_version: u32,
+    /// Target snapshot retained across the pre-window readiness barrier.
+    initial_message: Option<InstanceMessage>,
+    /// The writer thread (E2.3), joined by [`Self::detach`] so a native
+    /// close puts `Detach` on the socket before the process goes. `None`
+    /// for the harness client built over an already-connected stream.
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AttachClient {
+    /// Frontend id assigned by the daemon in the initial `Hello`.
+    pub fn frontend_id(&self) -> FrontendId {
+        self.frontend_id
+    }
+
+    /// Take the target snapshot that must be applied before first redraw.
+    pub fn take_initial_message(&mut self) -> Option<InstanceMessage> {
+        self.initial_message.take()
+    }
+
+    /// Send `FocusGained` or `FocusLost` (E2.3), the window's keyboard
+    /// focus as winit reports it. The daemon dispatches them to
+    /// `dispatch_focus` for the frontend they name.
+    pub fn send_focus(&self, gained: bool) -> Result<(), TransportError> {
+        let event = if gained {
+            FrontendEvent::FocusGained(self.frontend_id)
+        } else {
+            FrontendEvent::FocusLost(self.frontend_id)
+        };
+        self.send_event(event)
+    }
+
+    /// Detach cleanly (E2.3, Q#S1-1): enqueue `Detach`, close the outbox
+    /// so the writer drains what it holds and exits, and join it, so the
+    /// frame is on the socket before the caller exits the process. The
+    /// daemon answers a `Detach` with no `Goodbye` and releases the slot
+    /// when the socket closes, which the process exit does.
+    ///
+    /// The join is unbounded and that is deliberate: the writer blocks
+    /// only if the kernel's socket buffer is full, which for a frame of a
+    /// few bytes means the session was already wedged and F-008's
+    /// overflow policy would have closed the outbox first. A daemon that
+    /// is gone makes the write fail, and the writer returns on that too.
+    pub fn detach(mut self) {
+        // A refused enqueue means the outbox is already closed: the
+        // session tore down earlier and there is nothing left to say.
+        let _ = self.send_event(FrontendEvent::Detach(self.frontend_id));
+        {
+            let (lock, cvar) = &*self.outbox;
+            lock.lock().expect("outbox lock").closed = true;
+            cvar.notify_one();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+
+    /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
+    /// `SemanticRenderState::set_viewport` feeds the spans producer;
+    /// without this call the daemon ships no `StyleSpans` for the
+    /// buffer (no declared viewport ⇒ no scoped styling).
+    pub fn send_viewport(
+        &self,
+        buffer_id: BufferId,
+        visible: ByteRange,
+        generation: u64,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Viewport {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            visible,
+            generation,
+        })
+    }
+
+    /// Send a `FrontendEvent::Key` to the daemon (session B1). The
+    /// daemon routes it through `dispatch_key` — the same keymap +
+    /// command + Lua stack the TUI drives — so cursor motion and (in
+    /// later sessions) edits are produced entirely instance-side; the
+    /// resulting `CursorByte` / `CrdtOp` come back over the attach
+    /// stream. `timestamp_ns` is 0 (no capture clock plumbed yet; the
+    /// daemon does not depend on it).
+    pub fn send_key(&self, key: Key, mods: Modifiers) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Key(KeyEvent {
+            frontend_id: self.frontend_id,
+            key,
+            mods,
+            timestamp_ns: 0,
+        }))
+    }
+
+    /// Send a `FrontendEvent::TextInput` (GUI arc 1a): text the user
+    /// committed, by keypress or IME.
+    ///
+    /// **The caller must gate on [`Self::session_protocol_version`]
+    /// `>= TEXT_INPUT_MIN_VERSION` and fall back to `Key`** — this
+    /// method does not check, because the fallback needs the untranslated
+    /// key and only the caller has it. Withholding is the whole
+    /// old-peer contract: a `< 24` daemon keeps the behaviour it has,
+    /// including today's first-scalar truncation.
+    ///
+    /// Rejects oversize here as well as at the daemon, so a payload
+    /// that could never be accepted is not written to the socket at
+    /// all; rejection rather than truncation, per `TEXT_INPUT_MAX_BYTES`.
+    pub fn send_text_input(&self, text: &str) -> Result<(), TransportError> {
+        if text.len() > pmacs_protocol::TEXT_INPUT_MAX_BYTES {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "TextInput of {} bytes exceeds the {}-byte cap",
+                    text.len(),
+                    pmacs_protocol::TEXT_INPUT_MAX_BYTES
+                ),
+            )));
+        }
+        self.send_event(FrontendEvent::TextInput {
+            frontend_id: self.frontend_id,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Send a `FrontendEvent::Pointer` (session M-2): a locally
+    /// hit-tested gesture in source bytes. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 5`.
+    pub fn send_pointer(
+        &self,
+        buffer_id: BufferId,
+        byte: u64,
+        kind: PointerKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Pointer {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            byte,
+            kind,
+            mods,
+        })
+    }
+
+    /// Send a `FrontendEvent::Paste` (Q#CM6) carrying OS-clipboard
+    /// bytes read locally via `arboard` on Ctrl-V. The daemon inserts it
+    /// at the cursor (replacing any region) and refreshes its clipboard
+    /// slot, exactly as it handles the TUI's bracketed paste.
+    pub fn send_paste(&self, data: Vec<u8>) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Paste {
+            frontend_id: self.frontend_id,
+            data,
+        })
+    }
+
+    /// Send a `FrontendEvent::TerminalResize` (Vterm Stage 3): the
+    /// terminal-cell geometry this frontend has on screen. Callers gate
+    /// on [`Self::session_protocol_version`] `>= 19`.
+    ///
+    /// Cells, never pixels — the frontend divides its own drawable
+    /// rectangle by its own metrics, keeping the no-pixels contract the
+    /// document `Viewport` established.
+    pub fn send_terminal_resize(
+        &self,
+        buffer_id: BufferId,
+        size: CellSize,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::TerminalResize {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            size,
+        })
+    }
+
+    /// Send a `FrontendEvent::TerminalPointer` (Vterm Stage 3): a
+    /// gesture hit-tested locally to a terminal cell. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 19`.
+    pub fn send_terminal_pointer(
+        &self,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::TerminalPointer {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+        })
+    }
+
+    /// Send a `FrontendEvent::FrontendCellGeometry` (Q#BP15a): this
+    /// frontend's authoritative whole-cell layout capacity. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Valid **without** a side window on purpose — the daemon needs
+    /// columns before it can paint a first panel frame, so gating this on
+    /// panel presence would deadlock the first open.
+    pub fn send_frontend_cell_geometry(
+        &self,
+        geometry_epoch: u64,
+        total: CellSize,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::FrontendCellGeometry {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            total,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelResizeRows` (Q#BP15a): the fixed panel
+    /// rows a divider drag is requesting. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Both epochs ride along as identities, not geometry: the daemon
+    /// accepts the request only for the panel it most recently declared,
+    /// under the geometry it most recently accepted.
+    pub fn send_panel_resize_rows(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        rows: u32,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelResizeRows {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            rows,
+        })
+    }
+
+    /// §5b — the MAPPED gesture, echoing the generation of the frame
+    /// this frontend is displaying.
+    ///
+    /// A separate entry point rather than an `Option<u64>` on the one
+    /// above: the two variants are exclusive per session, and a
+    /// nullable field would let a caller send the mapped family with no
+    /// generation, which is the shape the daemon refuses.
+    #[allow(clippy::too_many_arguments)] // mirrors `PanelPointerMapped`'s wire shape exactly.
+    pub fn send_panel_pointer_mapped(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+        mapping_generation: u64,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointerMapped {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+            mapping_generation,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
+    /// hit-tested locally to a panel CELL. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// `buffer_id` and `panel_epoch` close different holes and neither
+    /// subsumes the other — the first catches an A→B buffer replacement,
+    /// the second a close/hide/reopen of the *same* buffer — so both are
+    /// carried rather than one being derived from the other.
+    pub fn send_panel_pointer(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointer {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+        })
+    }
+
+    /// Send a `FrontendEvent::MenuPointer` (Q#CM1) — open-menu
+    /// navigation hit-tested locally against the popup we drew. `index`
+    /// is the row the pointer is over (`None` = off the menu); `invoke`
+    /// marks a click (invoke the row, or dismiss when `index` is `None`).
+    pub fn send_menu_pointer(
+        &self,
+        index: Option<u32>,
+        invoke: bool,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::MenuPointer {
+            frontend_id: self.frontend_id,
+            index,
+            invoke,
+        })
+    }
+
+    /// The version this session negotiated — the frontend's
+    /// `AttachRequest` offer, which the daemon adopts.
+    ///
+    /// Every "is this variant on the wire?" gate keys on this, never on
+    /// [`Self::baseline_protocol_version`].
+    pub fn session_protocol_version(&self) -> u32 {
+        self.session_protocol_version
+    }
+
+    /// The compatibility baseline the daemon advertised in `Hello`.
+    ///
+    /// Only the handshake itself needs this. It is *lower* than
+    /// [`Self::session_protocol_version`] whenever an additive family has
+    /// been activated by counter-offer, which is the normal case.
+    pub fn baseline_protocol_version(&self) -> u32 {
+        self.baseline_protocol_version
+    }
+
+    /// E10z.2 --- how many events this session has queued for the
+    /// daemon, each once (`Outbox`'s count): what a frontend compares
+    /// with `InstanceMessage::InputHandled` to know that what it sent has
+    /// been handled.
+    pub fn events_sent(&self) -> u64 {
+        self.outbox.0.lock().expect("outbox lock").appended
+    }
+
+    /// Send a locally-authored CRDT operation to the daemon. The GPU
+    /// uses this for idle plain-text insertion after applying the same
+    /// op to its local Loro replica, avoiding a Key round trip on the
+    /// hot typing path.
+    pub fn send_crdt_op(&self, buffer_id: BufferId, op: CrdtOp) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::CrdtOp {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            op,
+        })
+    }
+
+    fn send_event(&self, event: FrontendEvent) -> Result<(), TransportError> {
+        let (lock, cvar) = &*self.outbox;
+        let mut ob = lock.lock().expect("outbox lock");
+        if ob.enqueue(event) {
+            // Drop the guard before notifying so the woken writer doesn't
+            // immediately re-block on a still-held lock.
+            drop(ob);
+            cvar.notify_one();
+            Ok(())
+        } else {
+            // Refusing a lossless event prevents replica divergence against
+            // a stalled daemon (or an earlier writer failure).
+            // Tear the session down actively (F-008): shut the socket so
+            // the reader wakes with EOF and fires `Disconnected`, giving a
+            // visible "(daemon disconnected)" instead of a GPU that keeps
+            // showing optimistic edits the daemon never received. Idempotent
+            // — a second shutdown just returns `NotConnected`, ignored.
+            drop(ob);
+            let _ = self.shutdown_handle.shutdown(std::net::Shutdown::Both);
+            Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "attach writer stopped or outbound queue overflowed",
+            )))
+        }
+    }
+}
+
+/// Short wire variant name for frontend diagnostics.
+pub fn instance_message_label(msg: &InstanceMessage) -> &'static str {
+    match msg {
+        InstanceMessage::CellDelta { .. } => "CellDelta",
+        InstanceMessage::LineWrapFacts { .. } => "LineWrapFacts",
+        InstanceMessage::Cursor(_) => "Cursor",
+        InstanceMessage::ModeLine(_) => "ModeLine",
+        InstanceMessage::Signal(_) => "Signal",
+        InstanceMessage::Goodbye(_) => "Goodbye",
+        InstanceMessage::CrdtOp { .. } => "CrdtOp",
+        InstanceMessage::PresenceUpdate { .. } => "PresenceUpdate",
+        InstanceMessage::BufferSnapshot { .. } => "BufferSnapshot",
+        InstanceMessage::CursorByte { .. } => "CursorByte",
+        InstanceMessage::StyleSpans { .. } => "StyleSpans",
+        InstanceMessage::Decorations { .. } => "Decorations",
+        InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
+        InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
+        InstanceMessage::StatusFacts { .. } => "StatusFacts",
+        InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
+        InstanceMessage::MenuPrompt { .. } => "MenuPrompt",
+        InstanceMessage::MinibufferPrompt { .. } => "MinibufferPrompt",
+        InstanceMessage::MinibufferPromptRows { .. } => "MinibufferPromptRows",
+        InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
+        InstanceMessage::FoldState { .. } => "FoldState",
+        InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
+        InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
+        InstanceMessage::LineNumbers { .. } => "LineNumbers",
+        InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
+        InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
+        InstanceMessage::FontFacts { .. } => "FontFacts",
+        InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
+        InstanceMessage::TerminalFrame(_) => "TerminalFrame",
+        InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
+        InstanceMessage::PanelFrame(_) => "PanelFrame",
+        InstanceMessage::Popup(_) => "Popup",
+        InstanceMessage::SessionToken(_) => "SessionToken",
+        InstanceMessage::InputHandled { .. } => "InputHandled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::net::UnixListener;
+
+    use pmacs_protocol::{InstanceCapabilities, InstanceIdentity, MouseButton};
+
+    fn caps(
+        multi_frontend: bool,
+        crdt_replica: bool,
+        semantic_render: bool,
+    ) -> InstanceCapabilities {
+        InstanceCapabilities {
+            multi_frontend,
+            crdt_replica,
+            semantic_render,
+        }
+    }
+
+    fn hello(protocol_version: u32) -> Hello {
+        Hello {
+            protocol_version,
+            assigned_frontend_id: FrontendId(7),
+            instance_identity: InstanceIdentity {
+                pmacs_version: "test".to_owned(),
+                build_hash: None,
+                instance_name: None,
+                uptime_secs: 0,
+                working_directory: "/tmp".to_owned(),
+            },
+            instance_capabilities: caps(true, true, true),
+        }
+    }
+
+    #[test]
+    fn initial_target_bootstrap_is_synchronous_byte_exact_and_snapshot_first() {
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socketpair");
+        let raw_path = OsString::from_vec(vec![b'n', b'o', b't', b'e', 0xff]);
+        let paths = InitialTargetPaths {
+            cwd: PathBuf::from("/launcher"),
+            path: PathBuf::from(&raw_path),
+        };
+        let expected = paths.clone();
+        let server = thread::spawn(move || {
+            write_message(&mut server_stream, &hello(PROTOCOL_VERSION)).expect("write Hello");
+            let request: AttachRequest =
+                read_message(&mut server_stream).expect("read AttachRequest");
+            assert_eq!(
+                request.frontend_capabilities.terminal_kind.as_deref(),
+                Some("trial")
+            );
+            let bootstrap: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            // E9 — the v27 step; read, so the fixture never drops its
+            // end while the client is still writing its handshake.
+            let resume: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
+            assert!(matches!(resume, FrontendEvent::Resume { token: None, .. }));
+            let target = bootstrap.initial_target.expect("initial target");
+            assert_eq!(target.cwd, expected.cwd.as_os_str().as_bytes());
+            assert_eq!(target.path, expected.path.as_os_str().as_bytes());
+
+            let buffer_id = BufferId::from_raw(41);
+            write_message(
+                &mut server_stream,
+                &InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot: vec![1, 2, 3],
+                },
+            )
+            .expect("write target snapshot");
+            write_message(
+                &mut server_stream,
+                &InstanceMessage::InitialTargetResult(InitialTargetResult::Opened { buffer_id }),
+            )
+            .expect("write target result");
+        });
+
+        let mut client =
+            connect_stream_with_sink(client_stream, "trial", Some(paths), None, |_| true)
+                .expect("target bootstrap");
+        assert!(matches!(
+            client.take_initial_message(),
+            Some(InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot,
+            }) if buffer_id == BufferId::from_raw(41) && crdt_snapshot == [1, 2, 3]
+        ));
+        assert!(client.take_initial_message().is_none());
+        server.join().expect("bootstrap server");
+    }
+
+    #[test]
+    fn initial_target_fails_before_attach_on_legacy_protocol() {
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socketpair");
+        let server = thread::spawn(move || {
+            write_message(&mut server_stream, &hello(19)).expect("write legacy Hello");
+        });
+        let Err(error) = connect_stream_with_sink(
+            client_stream,
+            "trial",
+            Some(InitialTargetPaths {
+                cwd: PathBuf::from("/launcher"),
+                path: PathBuf::from("note"),
+            }),
+            None,
+            |_| true,
+        ) else {
+            panic!("legacy target must fail");
+        };
+        assert!(matches!(
+            error,
+            AttachClientError::InitialTargetUnsupported { server: 19 }
+        ));
+        server.join().expect("legacy server");
+    }
+
+    #[test]
+    fn full_crdt_daemon_advertises_everything_required() {
+        // A daemon built with `--features crdt` advertises all three — the
+        // attach proceeds (F-003).
+        assert!(missing_capabilities(&caps(true, true, true)).is_empty());
+    }
+
+    #[test]
+    fn non_crdt_daemon_is_rejected_with_the_missing_caps() {
+        // The exact silent-hang case: no crdt build ⇒ crdt_replica /
+        // semantic_render false. We name them so the error is actionable.
+        let missing = missing_capabilities(&caps(true, false, false));
+        assert_eq!(missing, vec!["crdt_replica", "semantic_render"]);
+
+        // A single-frontend daemon is also unusable for a GPU attach.
+        assert_eq!(
+            missing_capabilities(&caps(false, true, true)),
+            vec!["multi_frontend"]
+        );
+    }
+
+    #[test]
+    fn capability_mismatch_status_line_is_actionable() {
+        // The in-window line (not stderr) must point at the fix.
+        let err = AttachClientError::CapabilityMismatch {
+            missing: vec!["crdt_replica"],
+        };
+        let status = err.window_status();
+        assert!(
+            status.contains("crdt"),
+            "status should name the fix: {status}"
+        );
+        // Other errors keep the generic placeholder.
+        let other = AttachClientError::VersionMismatch {
+            server: 99,
+            client: 6,
+        };
+        assert_eq!(other.window_status(), "(attach failed; see stderr)");
+    }
+
+    // --- F-008: bounded, coalescing outbox --------------------------------
+
+    fn fe_viewport(generation: u64) -> FrontendEvent {
+        FrontendEvent::Viewport {
+            frontend_id: FrontendId::LOCAL,
+            buffer_id: BufferId::from_raw(1),
+            visible: ByteRange { start: 0, end: 10 },
+            generation,
+        }
+    }
+
+    fn fe_pointer(kind: PointerKind, byte: u64) -> FrontendEvent {
+        FrontendEvent::Pointer {
+            frontend_id: FrontendId::LOCAL,
+            buffer_id: BufferId::from_raw(1),
+            byte,
+            kind,
+            mods: Modifiers::NONE,
+        }
+    }
+
+    fn fe_key(c: char) -> FrontendEvent {
+        FrontendEvent::Key(KeyEvent {
+            frontend_id: FrontendId::LOCAL,
+            key: Key::Char(c),
+            mods: Modifiers::NONE,
+            timestamp_ns: 0,
+        })
+    }
+
+    #[test]
+    fn consecutive_viewports_coalesce_to_the_latest() {
+        let mut ob = Outbox::new();
+        assert!(ob.enqueue(fe_viewport(1)));
+        assert!(ob.enqueue(fe_viewport(2)));
+        assert!(ob.enqueue(fe_viewport(3)));
+        // A scroll flood collapses to one — the newest generation.
+        assert_eq!(ob.queue.len(), 1);
+        match &ob.queue[0] {
+            FrontendEvent::Viewport { generation, .. } => assert_eq!(*generation, 3),
+            other => panic!("expected a viewport, got {other:?}"),
+        }
+    }
+
+    /// E10z.2 --- the outbox counts each event once as it goes on the
+    /// queue: one that coalesces into the tail is that same event on the
+    /// wire, and a refused one is no event. The daemon's
+    /// `InputHandled` counts what it reads, so the two agree only if this
+    /// equals what the writer will put on the socket.
+    #[test]
+    fn the_outbox_counts_what_goes_on_the_wire_once() {
+        let mut ob = Outbox::new();
+        assert!(ob.enqueue(fe_viewport(1)));
+        assert!(ob.enqueue(fe_viewport(2)), "coalesces into the tail");
+        assert!(ob.enqueue(fe_key('a')));
+        assert!(ob.enqueue(fe_viewport(3)), "a viewport after a key is new");
+        assert_eq!(ob.queue.len(), 3, "premise: three events are queued");
+        assert_eq!(ob.appended, 3, "one count per queued event");
+        // Whatever the writer has taken stays counted.
+        ob.queue.clear();
+        assert!(ob.enqueue(fe_key('b')));
+        assert_eq!(ob.appended, 4);
+        ob.closed = true;
+        assert!(!ob.enqueue(fe_key('c')), "a closed outbox refuses");
+        assert_eq!(ob.appended, 4, "a refused event is not counted");
+    }
+
+    #[test]
+    fn drags_coalesce_but_clicks_keep_their_order() {
+        let mut ob = Outbox::new();
+        // A press, a run of motion, and a release.
+        ob.enqueue(fe_pointer(PointerKind::Down, 0));
+        ob.enqueue(fe_pointer(PointerKind::Drag, 1));
+        ob.enqueue(fe_pointer(PointerKind::Drag, 2));
+        ob.enqueue(fe_pointer(PointerKind::Drag, 3));
+        ob.enqueue(fe_pointer(PointerKind::Up, 4));
+        // Down, one coalesced Drag (latest byte), Up — order preserved, the
+        // gesture is intact; the drag run collapsed to O(1).
+        assert_eq!(ob.queue.len(), 3);
+        assert!(matches!(
+            &ob.queue[0],
+            FrontendEvent::Pointer {
+                kind: PointerKind::Down,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &ob.queue[1],
+            FrontendEvent::Pointer {
+                kind: PointerKind::Drag,
+                byte: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &ob.queue[2],
+            FrontendEvent::Pointer {
+                kind: PointerKind::Up,
+                ..
+            }
+        ));
+    }
+
+    fn fe_terminal_pointer(kind: MouseKind, row: u32, col: u32) -> FrontendEvent {
+        FrontendEvent::TerminalPointer {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(row, col),
+            kind,
+            mods: Modifiers::NONE,
+        }
+    }
+
+    fn fe_panel_mapped(kind: MouseKind, row: u32, col: u32, generation: u64) -> FrontendEvent {
+        FrontendEvent::PanelPointerMapped {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(row, col),
+            kind,
+            mods: Modifiers::NONE,
+            geometry_epoch: 1,
+            panel_epoch: 1,
+            mapping_generation: generation,
+        }
+    }
+
+    /// §5b G13a/G13b — the mapped family keeps the legacy family's
+    /// coalescing contract: `Move` and `Drag` collapse to the latest
+    /// coordinate AND generation together; press, release and every
+    /// wheel kind stay lossless and ordered.
+    #[test]
+    fn mapped_panel_motion_coalesces_carrying_its_latest_generation() {
+        let mut ob = Outbox::new();
+        ob.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 0, 0, 4));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 1, 4));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 2, 5));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 3, 6));
+        ob.enqueue(fe_panel_mapped(MouseKind::Up(MouseButton::Left), 0, 3, 6));
+        assert_eq!(
+            ob.queue.len(),
+            3,
+            "the drag run collapsed to one; without a tag of its own the \
+             mapped family is lossless and this is five"
+        );
+        // The whole event is replaced, so coordinate and generation
+        // advance TOGETHER. A tag that replaced only the coordinate
+        // would leave generation 4 on a cell measured under 6, which the
+        // daemon then refuses as stale.
+        assert!(
+            matches!(
+                &ob.queue[1],
+                FrontendEvent::PanelPointerMapped {
+                    kind: MouseKind::Drag(MouseButton::Left),
+                    coord: CellCoord { row: 0, col: 3 },
+                    mapping_generation: 6,
+                    ..
+                }
+            ),
+            "surviving drag: {:?}",
+            &ob.queue[1]
+        );
+
+        // G13b — wheel ticks carry scroll DISTANCE. Two ticks in one
+        // generation must both survive the queue, or the panel scrolls
+        // once and stops.
+        let mut wheel = Outbox::new();
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollUp, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollUp, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollDown, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollLeft, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollRight, 1, 1, 7));
+        assert_eq!(wheel.queue.len(), 5, "every wheel kind stays lossless");
+
+        // Repeated presses are what the daemon reads as a multi-click,
+        // and a right press is the context gesture.
+        let mut presses = Outbox::new();
+        presses.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 2, 2, 8));
+        presses.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 2, 2, 8));
+        presses.enqueue(fe_panel_mapped(
+            MouseKind::Down(MouseButton::Right),
+            2,
+            2,
+            8,
+        ));
+        assert_eq!(presses.queue.len(), 3, "presses stay lossless");
+
+        // Motion does not collapse ACROSS an intervening lossless event.
+        let mut mixed = Outbox::new();
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 1, 9));
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 2, 9));
+        assert_eq!(mixed.queue.len(), 1);
+        mixed.enqueue(fe_panel_mapped(MouseKind::ScrollDown, 3, 2, 9));
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 3, 9));
+        assert_eq!(
+            mixed.queue.len(),
+            3,
+            "the wheel tick between them must not be jumped"
+        );
+
+        // And Move does not fold into a Drag tail: they are separate
+        // gestures, and one tag for both would turn a hover into part of
+        // a selection.
+        let mut kinds = Outbox::new();
+        kinds.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 4, 1, 9));
+        kinds.enqueue(fe_panel_mapped(MouseKind::Move, 4, 2, 9));
+        assert_eq!(kinds.queue.len(), 2);
+
+        // The two FAMILIES do not coalesce into each other either.
+        let mut families = Outbox::new();
+        families.enqueue(FrontendEvent::PanelPointer {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(5, 1),
+            kind: MouseKind::Move,
+            mods: Modifiers::NONE,
+            geometry_epoch: 1,
+            panel_epoch: 1,
+        });
+        families.enqueue(fe_panel_mapped(MouseKind::Move, 5, 2, 9));
+        assert_eq!(families.queue.len(), 2);
+    }
+
+    /// Acceptance 34: terminal move/drag runs coalesce to the latest
+    /// cell, while press, release, and wheel stay lossless and ordered.
+    #[test]
+    fn terminal_motion_coalesces_but_presses_and_wheels_stay_lossless() {
+        let mut ob = Outbox::new();
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Down(MouseButton::Left),
+            0,
+            0,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            1,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            2,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            3,
+        ));
+        ob.enqueue(fe_terminal_pointer(MouseKind::Up(MouseButton::Left), 0, 3));
+        assert_eq!(ob.queue.len(), 3, "the drag run collapsed to one");
+        assert!(matches!(
+            &ob.queue[1],
+            FrontendEvent::TerminalPointer {
+                kind: MouseKind::Drag(MouseButton::Left),
+                coord: CellCoord { row: 0, col: 3 },
+                ..
+            }
+        ));
+
+        // Wheel ticks carry scroll DISTANCE; collapsing a run would
+        // silently lose scrollback rows.
+        let mut wheel = Outbox::new();
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        assert_eq!(wheel.queue.len(), 3, "wheel ticks are lossless");
+
+        // Hover motion coalesces, but not across a different kind.
+        let mut moves = Outbox::new();
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 1));
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 2));
+        assert_eq!(moves.queue.len(), 1);
+        moves.enqueue(fe_terminal_pointer(MouseKind::ScrollDown, 2, 2));
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 3));
+        assert_eq!(moves.queue.len(), 3);
+    }
+
+    #[test]
+    fn coalescing_only_collapses_a_same_kind_tail() {
+        let mut ob = Outbox::new();
+        // Keys between viewports break the run: nothing coalesces, order
+        // and every lossless event are preserved.
+        ob.enqueue(fe_key('a'));
+        ob.enqueue(fe_viewport(1));
+        ob.enqueue(fe_key('b'));
+        ob.enqueue(fe_viewport(2));
+        assert_eq!(ob.queue.len(), 4);
+        // A drag does not fold into a Down tail (different kind).
+        let mut ob2 = Outbox::new();
+        ob2.enqueue(fe_pointer(PointerKind::Down, 0));
+        ob2.enqueue(fe_pointer(PointerKind::Drag, 1));
+        assert_eq!(ob2.queue.len(), 2);
+    }
+
+    #[test]
+    fn lossless_overflow_fails_fast_and_closes() {
+        let mut ob = Outbox::new();
+        for i in 0..OUTBOX_MAX {
+            assert!(ob.enqueue(fe_key('x')), "fill up to the cap (i={i})");
+        }
+        // The cap-crossing lossless event is rejected and the outbox is
+        // now closed — a clean disconnect beats dropping a CrdtOp silently.
+        assert!(!ob.enqueue(fe_key('y')));
+        assert!(ob.closed);
+        // Once closed, everything is refused (including coalesceable kinds).
+        assert!(!ob.enqueue(fe_viewport(1)));
+    }
+
+    #[test]
+    fn coalescing_does_not_count_against_the_cap() {
+        let mut ob = Outbox::new();
+        // Even a huge scroll flood stays at one queued event, so it can
+        // never trip the overflow fail-fast.
+        for g in 0..(OUTBOX_MAX as u64 * 4) {
+            assert!(ob.enqueue(fe_viewport(g)));
+        }
+        assert_eq!(ob.queue.len(), 1);
+        assert!(!ob.closed);
+    }
+
+    #[test]
+    fn a_closed_outbox_shuts_the_socket_down_to_wake_the_reader() {
+        use std::io::Read;
+        // A socketpair stands in for the daemon connection; `a` is the peer
+        // a blocked reader would be reading from.
+        let (mut a, b) = UnixStream::pair().expect("socketpair");
+        // The post-overflow state: the outbox is already closed.
+        let mut outbox = Outbox::new();
+        outbox.closed = true;
+        let client = AttachClient {
+            outbox: Arc::new((Mutex::new(outbox), Condvar::new())),
+            shutdown_handle: b,
+            frontend_id: FrontendId::LOCAL,
+            session_protocol_version: PROTOCOL_VERSION,
+            baseline_protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            initial_message: None,
+            writer: None,
+        };
+        // A send against the closed outbox fails *and* shuts the socket
+        // down (F-008 fail-fast is now a real teardown, not just a flag).
+        assert!(client.send_event(fe_key('x')).is_err());
+        // The peer reads EOF: a real blocked reader would wake here and
+        // fire Disconnected, instead of the session diverging silently.
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            a.read(&mut buf).expect("read peer"),
+            0,
+            "peer should see EOF after the shutdown"
+        );
+    }
+    #[test]
+    fn managed_attach_starts_only_for_absent_or_refused_sockets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("managed.sock");
+        let socket = socket_path.as_path();
+        assert!(
+            initial_startup_authorized(socket, &io::Error::new(io::ErrorKind::NotFound, "absent"))
+                .expect("classify absent socket")
+        );
+        assert!(
+            initial_startup_authorized(
+                socket,
+                &io::Error::new(io::ErrorKind::ConnectionRefused, "refused")
+            )
+            .expect("classify vanished socket")
+        );
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !initial_startup_authorized(socket, &io::Error::new(kind, "final"))
+                    .expect("classify final connect error"),
+                "{kind:?} must not authorize daemon startup"
+            );
+        }
+    }
+
+    /// macOS's `connect(2)` on a regular file is `ENOTSOCK`, an errno
+    /// `std` names no kind for; the verdict is the path's, so it is the
+    /// non-socket refusal there as on Linux, and a stale socket file is
+    /// still a start.
+    #[test]
+    fn managed_attach_classifies_by_the_path_not_the_errno() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plain = temp.path().join("plain.sock");
+        std::fs::write(&plain, "not a socket").expect("write");
+        let enotsock = io::Error::other("Socket operation on non-socket (os error 38)");
+        assert!(matches!(
+            initial_startup_authorized(&plain, &enotsock),
+            Err(ManagedAttachError::NonSocketPath(rejected)) if rejected == plain
+        ));
+        assert!(plain.exists(), "never removed, never spawned over");
+        let stale = temp.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).expect("bind"));
+        assert!(
+            initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::ConnectionRefused, "refused")
+            )
+            .expect("classify a stale socket file"),
+            "a socket file nothing answers authorizes the start"
+        );
+        assert!(
+            !initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::PermissionDenied, "denied")
+            )
+            .expect("classify a denied socket"),
+            "another errno on a socket file fails closed"
+        );
+    }
+
+    #[test]
+    fn managed_retry_adds_only_interrupted_and_would_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("managed.sock");
+        let socket = socket_path.as_path();
+        for kind in [io::ErrorKind::Interrupted, io::ErrorKind::WouldBlock] {
+            assert!(
+                post_spawn_retryable(socket, &io::Error::new(kind, "transient"))
+                    .expect("classify transient retry")
+            );
+        }
+        assert!(
+            !post_spawn_retryable(
+                socket,
+                &io::Error::new(io::ErrorKind::PermissionDenied, "final")
+            )
+            .expect("classify final retry error")
+        );
+    }
+
+    #[test]
+    fn managed_attach_refuses_a_non_socket_path_without_spawning() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let result = connect_managed_inner(
+            &path,
+            Path::new("/unused/pmacs"),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "synthetic refused connect",
+                ))
+            },
+            |_, _| panic!("non-socket path must not spawn"),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            None,
+            |_| false,
+        );
+        assert!(matches!(
+            result,
+            Err(ManagedAttachError::NonSocketPath(rejected)) if rejected == path
+        ));
+    }
+
+    #[test]
+    fn managed_attach_fails_closed_on_non_retryable_connect_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("managed.sock");
+        let result = connect_managed_inner(
+            &socket,
+            Path::new("/unused/pmacs"),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "synthetic permission failure",
+                ))
+            },
+            |_, _| panic!("permission failure must not spawn"),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            None,
+            |_| false,
+        );
+        assert!(matches!(
+            result,
+            Err(ManagedAttachError::Attach(AttachClientError::Connect(error)))
+                if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn managed_retry_survives_transients_and_uses_the_successful_stream() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("managed.sock");
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socket pair");
+        let server = thread::spawn(move || {
+            // Advertises the BASELINE, like a real daemon: the session
+            // version is settled by the client's counter-offer below, and a
+            // fixture that advertised the current wire could not tell the
+            // two apart.
+            let hello = Hello {
+                protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+                assigned_frontend_id: FrontendId::LOCAL,
+                instance_identity: InstanceIdentity {
+                    pmacs_version: "managed-retry-test".to_owned(),
+                    build_hash: None,
+                    instance_name: None,
+                    uptime_secs: 0,
+                    working_directory: "/tmp".to_owned(),
+                },
+                instance_capabilities: caps(true, true, true),
+            };
+            write_message(&mut server_stream, &hello).expect("write Hello");
+            let _: AttachRequest =
+                read_message(&mut server_stream).expect("read real AttachRequest");
+            // The whole v27 semantic handshake, read before this end is
+            // dropped: a fixture that returned here, with the client's
+            // bootstrap and `Resume` still to be written, raced the
+            // client's writes against its own drop, and lost under
+            // load as `Handshake(Io(BrokenPipe))` (the registry's R7).
+            let _: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            let _: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
+        });
+        let mut attempts = 0;
+        let mut client_stream = Some(client_stream);
+        let managed = connect_managed_inner(
+            &socket,
+            Path::new("/bin/sh"),
+            |_| {
+                attempts += 1;
+                match attempts {
+                    1 => Err(io::Error::new(io::ErrorKind::NotFound, "initial miss")),
+                    2 => Err(io::Error::new(io::ErrorKind::Interrupted, "signal")),
+                    3 => Err(io::Error::new(io::ErrorKind::WouldBlock, "backlog")),
+                    4 => Ok(client_stream.take().expect("single successful stream")),
+                    _ => panic!("unexpected connection attempt"),
+                }
+            },
+            |_, _| Command::new("/bin/sh").args(["-c", "exit 0"]).spawn(),
+            Duration::from_secs(1),
+            Duration::ZERO,
+            None,
+            |_| true,
+        )
+        .expect("transient sequence must attach");
+        assert_eq!(attempts, 4);
+        assert!(managed.daemon.spawned_daemon());
+        assert_eq!(
+            managed.client.session_protocol_version(),
+            PROTOCOL_VERSION,
+            "a managed attach negotiates this binary's wire, not the Hello baseline"
+        );
+        assert_eq!(
+            managed.client.baseline_protocol_version(),
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            "while the daemon's server-first Hello still advertises the baseline"
+        );
+        server.join().expect("handshake server");
+    }
+
+    #[test]
+    fn startup_timeout_reports_the_configured_duration() {
+        let error = ManagedAttachError::StartupTimeout {
+            socket: PathBuf::from("/tmp/unused.sock"),
+            connect: io::Error::new(io::ErrorKind::NotFound, "still absent"),
+            daemon_status: Some("exit status: 17".to_owned()),
+            timeout: Duration::from_millis(1),
+            stderr_log: Some(PathBuf::from("/tmp/unused.sock.stderr")),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("1ms"),
+            "unexpected timeout message: {message}"
+        );
+        assert!(!message.contains("5 seconds"));
+        // E2.4 — the message names the captured stderr.
+        assert!(
+            message.ends_with("; the daemon's stderr is in /tmp/unused.sock.stderr"),
+            "the failure must name the daemon's stderr file: {message}"
+        );
+    }
+
+    /// E2.4 — a spawned daemon's stderr is captured beside the socket,
+    /// and a startup failure's message names the file, so what the
+    /// daemon printed before dying can be read. The "daemon" here is a
+    /// shell that prints one line and exits, which is exactly the shape
+    /// a real daemon refusing its socket has. It is a script this row
+    /// has just written, so its spawn is [`spawn_written_daemon`]'s,
+    /// which tries again while another test's fork holds it busy (#250,
+    /// E10r's review 3): each try writes a start line, so the row reads
+    /// the last one and what follows it.
+    #[test]
+    fn a_spawned_daemons_stderr_is_captured_beside_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("d.sock");
+        let executable = dir.path().join("fake-daemon");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho 'fake daemon: refusing to start' >&2\nexit 7\n",
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod");
+        let error = connect_managed_inner(
+            &socket,
+            &executable,
+            |path| UnixStream::connect(path),
+            |executable, socket| Ok(spawn_written_daemon(executable, socket)),
+            Duration::from_millis(300),
+            Duration::from_millis(20),
+            None,
+            |_| true,
+        )
+        .err()
+        .expect("no daemon listens, so the attach times out");
+        let log = daemon_stderr_path(&socket);
+        let message = error.to_string();
+        assert!(
+            message.contains(&log.display().to_string()),
+            "the failure names the stderr file: {message}"
+        );
+        let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
+        let lines: Vec<&str> = captured.lines().collect();
+        let last_start = lines
+            .iter()
+            .rposition(|line| line.contains("a daemon started by a window"))
+            .unwrap_or_else(|| panic!("no start line: {captured}"));
+        assert_eq!(
+            &lines[last_start + 1..],
+            ["fake daemon: refusing to start"],
+            "{captured}"
+        );
+        assert!(
+            matches!(error, ManagedAttachError::StartupTimeout { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// [`spawn_daemon`] of a script this row has just written. Another test's fork in this
+    /// process can hold the script's write descriptor open until its child execs, and the
+    /// spawn then reads `ETXTBSY` (a local gate, `20261108T000503Z-1210505`), so it is tried
+    /// again while that lasts.
+    fn spawn_written_daemon(executable: &Path, socket: &Path) -> Child {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match spawn_daemon(executable, socket) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                spawned => return spawned.expect("spawn"),
+            }
+        }
+    }
+
+    /// E10r's H1: the window's route opens that file as the bridge's does: at 0600, and
+    /// a link planted there is not followed, its target keeping its bytes, the daemon
+    /// starting all the same with its words going nowhere.
+    #[test]
+    fn a_spawned_daemons_stderr_is_private_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executable = dir.path().join("fake-daemon");
+        let ran = dir.path().join("ran");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho words >&2\n: > '{}'\n",
+                ran.as_path().display()
+            ),
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let socket = dir.path().join("plain.sock");
+        let mut child = spawn_written_daemon(&executable, &socket);
+        child.wait().expect("wait");
+        let log = daemon_stderr_path(&socket);
+        let captured = std::fs::read_to_string(&log).expect("the file");
+        assert!(captured.ends_with("---\nwords\n"), "{captured}");
+        let mode = std::fs::metadata(&log).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::remove_file(&ran).expect("reset");
+        let socket = dir.path().join("linked.sock");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "the victim's own\n").expect("the victim");
+        std::os::unix::fs::symlink(&victim, daemon_stderr_path(&socket)).expect("the link");
+        let mut child = spawn_written_daemon(&executable, &socket);
+        child.wait().expect("wait");
+        assert!(ran.exists(), "the daemon started all the same");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the victim"),
+            "the victim's own\n",
+            "the window's route wrote through a link"
+        );
+    }
+}
