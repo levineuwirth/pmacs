@@ -67,7 +67,14 @@ struct Presentation {
     plan: Rc<TerminalPaintPlan>,
 }
 
+struct DividerDrag {
+    start_y: Pixels,
+    start_rows: u32,
+    last_rows: u32,
+}
+
 pub struct Panel {
+    drag: Option<DividerDrag>,
     version: u32,
     geometry: u64,
     surface: Option<(Size<Pixels>, f32)>,
@@ -81,6 +88,7 @@ pub struct Panel {
 impl Panel {
     pub fn new(version: u32) -> Self {
         Self {
+            drag: None,
             version,
             geometry: 0,
             surface: None,
@@ -118,6 +126,7 @@ impl Panel {
             || self.advance != advance
             || self.total != total
         {
+            self.drag = None;
             let Some(epoch) = self.geometry.checked_add(1) else {
                 // Disown the old cell range so a late frame cannot restore it.
                 self.total = CellSize::default();
@@ -138,6 +147,7 @@ impl Panel {
     pub fn apply(&mut self, payload: PanelFramePayload) -> bool {
         let (frame, generation) = match payload {
             PanelFramePayload::Absent => {
+                self.drag = None;
                 self.wheel_remainder = 0.;
                 return self.visible.take().is_some();
             }
@@ -174,6 +184,7 @@ impl Panel {
             old.mapping.panel != mapping.panel || old.mapping.buffer != mapping.buffer
         }) {
             self.wheel_remainder = 0.;
+            self.drag = None;
         }
         self.generation = generation.unwrap_or_default();
         self.visible = Some(Presentation {
@@ -191,6 +202,10 @@ impl Panel {
 
     pub fn is_visible(&self) -> bool {
         self.visible.is_some()
+    }
+
+    pub fn end_drag(&mut self) -> bool {
+        self.drag.take().is_some()
     }
 
     pub fn focused(&self) -> bool {
@@ -300,21 +315,80 @@ impl Panel {
                         "C-x o   Focus output"
                     }),
             );
+        // The kit's public resizable group owns the pane sizes. Here each
+        // accepted daemon frame supplies both the height and its pointer map.
+        let divider = div()
+            .id("output-divider")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(8.))
+            .cursor(gpui::CursorStyle::ResizeUpDown)
+            .border_t_1()
+            .border_color(rgb(0x494742))
+            .hover(|s| s.border_t_2().border_color(rgb(0xc0bcb3)))
+            .when(self.drag.is_some(), |s| {
+                s.border_t_2().border_color(rgb(0xf6dba2))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
+                    if view.accepts_panel_input(mapping) {
+                        view.panel.drag = Some(DividerDrag {
+                            start_y: event.position.y,
+                            start_rows: grid.rows,
+                            last_rows: grid.rows,
+                        });
+                        view.source_drag = None;
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            );
         Some(
             div()
+                .relative()
                 .w_full()
                 .flex_shrink_0()
                 .overflow_hidden()
-                .border_t_1()
-                .border_color(rgb(0x494742))
+                .pt(px(1.))
                 .bg(rgb(BACKGROUND))
                 .child(title)
-                .child(div().px(px(PAD)).child(body)),
+                .child(div().px(px(PAD)).child(body))
+                .child(divider),
         )
     }
 }
 
 impl FileView {
+    pub(super) fn drag_panel(&mut self, y: Pixels, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = &mut self.panel.drag else {
+            return false;
+        };
+        if let Some(p) = &self.panel.visible
+            && let Some(client) = &self.client
+            && self.notice.is_none()
+            && self.prompt.is_none()
+        {
+            let delta = (f32::from(drag.start_y - y) / ROW).round() as i64;
+            let rows = (i64::from(drag.start_rows) + delta).clamp(1, i64::from(u32::MAX)) as u32;
+            if rows != drag.last_rows {
+                if let Err(error) =
+                    client.send_panel_resize_rows(p.mapping.geometry, p.mapping.panel, rows)
+                {
+                    self.notice = Some(format!("Could not resize output · {error}"));
+                    self.panel.end_drag();
+                    cx.notify();
+                } else {
+                    drag.last_rows = rows;
+                }
+            }
+        }
+        true
+    }
+
     fn accepts_panel_input(&self, mapping: Mapping) -> bool {
         self.prompt.is_none()
             && self.notice.is_none()

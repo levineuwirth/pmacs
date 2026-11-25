@@ -184,6 +184,7 @@ impl FileView {
             self.prompt_scroll = UniformListScrollHandle::new();
         }
         if let Some(p) = &prompt {
+            self.panel.end_drag();
             self.source_drag = None;
             p.reveal_selected(&self.prompt_scroll);
         }
@@ -243,6 +244,13 @@ impl FileView {
     }
 
     fn source_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button == Some(MouseButton::Left) && self.drag_panel(event.position.y, cx)
+        {
+            return;
+        }
+        if self.panel.end_drag() {
+            cx.notify();
+        }
         if event.dragging() {
             self.drag_to(event.position, event.modifiers, cx);
         } else {
@@ -251,6 +259,11 @@ impl FileView {
     }
 
     fn source_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_panel(event.position.y, cx) {
+            self.panel.end_drag();
+            cx.notify();
+            return;
+        }
         self.drag_to(event.position, event.modifiers, cx);
         if let Some((_, byte)) = self.source_drag.take() {
             self.send_pointer(byte, PointerKind::Up, event.modifiers, cx);
@@ -606,6 +619,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     cx.observe_window_activation(window, |view: &mut FileView, w, cx| {
                         if !w.is_window_active() {
                             view.source_drag = None;
+                            view.panel.end_drag();
                         }
                         if let Some(client) = &view.client
                             && let Err(error) = client.send_focus(w.is_window_active())

@@ -1,4 +1,6 @@
 """Build-panel portion of the private Wayland editing test."""
+import csv
+import io
 import sys
 
 
@@ -16,9 +18,11 @@ def build_panel(path, out, run, key, shot, pane, language, pointer, wait_for):
         (out / f"{name}-output.txt").write_text(text)
         return text.lower()
 
-    def visible(name, *words):
+    def visible(name, *words, dimensions=None):
         def observe():
             image = shot(name)
+            if dimensions and image.size != dimensions:
+                return None
             text = ocr(name, image)
             return image if all(word in text for word in words) else None
         return wait_for(observe, f"{name} with {words}")
@@ -39,8 +43,8 @@ def build_panel(path, out, run, key, shot, pane, language, pointer, wait_for):
     # Cargo and the editor's job watcher update independently of paint.
     initial = visible("11-build", "output", "compilation")
     def border(image):
-        return next(y for y in range(image.height // 2, image.height)
-                    if image.getpixel((0, y)) in [(246, 219, 162), (86, 84, 78)])
+        return next((y for y in range(40, image.height)
+                     if image.getpixel((0, y)) in [(246, 219, 162), (86, 84, 78)]), -1)
     visible("11-finished", "exited abnorm")
     top = border(initial)
     click(initial, 75, top + 32 + 10)
@@ -48,15 +52,98 @@ def build_panel(path, out, run, key, shot, pane, language, pointer, wait_for):
              "the daemon to focus the clicked panel")
     command("cursor.buffer-end")
     visible("13-failed", "3 passed", "1 failed", "average", "half", "compile exited")
+    def drag(frame, scale, target):
+        x = frame.width // 2
+        y = border(frame) + round(4 * scale)
+        run(sys.executable, pointer, "--size", f"{frame.width}x{frame.height}",
+            "drag", str(x), str(y), str(x), str(target + round(4 * scale)))
+
+    gold = (246, 219, 162)
+    gray = (86, 84, 78)
+
+    def settled(name, position, color, dimensions=None):
+        def observe():
+            frame = shot(name)
+            top = border(frame)
+            if dimensions:
+                # Sway can expose the new output with the previous, smaller
+                # surface at its origin while GPUI is waiting for a new frame.
+                if frame.size != dimensions or top < 0 or frame.getpixel(
+                        (frame.width - 2, top + 10)) != (50, 48, 44):
+                    return None
+            return frame if top >= 0 and position(top) and frame.getpixel((0, top + 10)) == color else None
+        return wait_for(observe, name)
+
+    # Read the actual diagnostic's baseline from the painted output. The
+    # stock daemon offsets the numbered column, but the row must match.
+    def hit_failure(name, frame, scale):
+        top = border(frame) + round(32 * scale)
+        crop = out / f"{name}-grid.png"
+        frame.crop((0, top, frame.width, frame.height - round(24 * scale))).save(crop)
+        tsv = run("tesseract", crop, "stdout", "-l", language, "--psm", "6", "tsv")
+        word = next(row for row in csv.DictReader(io.StringIO(tsv), delimiter="\t")
+                    if "half" in row["text"].lower())
+        y = top + int(word["top"]) + int(word["height"]) // 2
+        x = round(82 * scale)
+        click(frame, x, y)
+        def caret_on_failure(capture):
+            after = shot(capture)
+            return any(after.getpixel((col, y)) == gold
+                       for col in range(x - round(10 * scale), x + round(70 * scale)))
+        wait_for(lambda: caret_on_failure(name), "the output caret on the clicked failure")
+        key("Down")
+        wait_for(lambda: not caret_on_failure(name + "-down"), "Down moving the caret off the failure")
+
+    for scale, mode in ((1, "1280x800"), (1.5, "1920x1200")):
+        run("swaymsg", "output", "HEADLESS-1", "resolution", mode, "scale", str(scale))
+        tag = f"divider-{scale}"
+        frame = visible(f"{tag}-before", "exited", "half",
+                        dimensions=(round(1280 * scale), round(800 * scale)))
+        original_top = border(frame)
+        bigger = original_top - round(60 * scale)
+        drag(frame, scale, bigger)
+        enlarged = settled(f"{tag}-grown", lambda y: abs(y - bigger) <= 2, gold)
+        hit_failure(f"{tag}-click", enlarged, scale)
+        command("cursor.buffer-end")
+        visible(f"{tag}-end", "compile exited")
+        focus_next()
+        src = settled(f"{tag}-source", lambda y: abs(y - bigger) <= 2, gray)
+        drag(src, scale, 0)
+        maximum = settled(f"{tag}-max", lambda y: 64 * scale < y < bigger - 20 * scale, gray)
+        drag(maximum, scale, maximum.height - round(8 * scale))
+        minimum = settled(f"{tag}-min", lambda y: bigger < y <= maximum.height - 96 * scale + 2, gray)
+        drag(minimum, scale, original_top)
+        settled(f"{tag}-restored", lambda y: abs(y - original_top) <= 2, gray)
+        key("a", "ctrl")
+        run("wtype", "--", "resizefocus")
+        key("x", "ctrl")
+        key("s", "ctrl")
+        wait_for(lambda: "resizefocus" in path.read_text(), "typing in source after the drag")
+        key("slash", "ctrl")
+        key("x", "ctrl")
+        key("s", "ctrl")
+        wait_for(lambda: "resizefocus" not in path.read_text(), "undo in source")
+        focus_next()
+        command("cursor.buffer-end")
     # Resize with the result still open. A new cell declaration must obtain
     # a new frame before a click can address its row and column.
+    run("swaymsg", "output", "HEADLESS-1", "resolution", "640x360", "scale", "1")
+    compact = settled("compact-before", lambda y: y > 0, gold, dimensions=(640, 360))
+    drag(compact, 1, 350)
+    short = settled("compact-min", lambda y: abs(y - (360 - 96)) <= 2, gold)
+    drag(short, 1, 0)
+    settled("compact-max", lambda y: 64 < y < 106, gold)
     run("swaymsg", "output", "HEADLESS-1", "resolution", "900x720", "scale", "1")
+    large = settled("14-back", lambda y: y > 0, gold, dimensions=(900, 720))
+    drag(large, 1, 720 - 296)
+    settled("14-original-height", lambda y: abs(y - (720 - 296)) <= 2, gold)
+    command("cursor.buffer-start")
+    command("cursor.buffer-end")
     resized = visible("14-resized", "3 passed", "1 failed", "compile exited")
     top = border(resized)
     # Click an inked cell on the result row; the daemon paints its caret
     # at the hit. The separate header and side padding are outside the grid.
     x = 82
-    gold = (246, 219, 162)
 
     def long_row(image):
         return next(y for y in range(border(image) + 32, image.height - 46, 20)

@@ -38,7 +38,8 @@ Closing GPUI leaves the daemon and TUI running.
 In a Rust project, run `Alt-x compile.run Enter` and replace the proposed
 command with `cargo test`. The output appears below the source. Click an output
 line to focus the panel, or press `Ctrl-x` followed by `o` to switch focus.
-Use the arrow keys or wheel to read the output. From the panel, the command
+Drag the line above Output to change its height in whole rows. The pane you
+were using keeps keyboard focus. Use the arrow keys or wheel to read the output. From the panel, the command
 `cursor.buffer-end` jumps to the final test summary. Press `Ctrl-x o` again
 to edit the source. Save with `Ctrl-x Ctrl-s` and run `compile.recompile`.
 
@@ -60,7 +61,8 @@ To exercise a real failing build, add `--build-baseline /path/to/pmacs-baseline`
 The check copies the baseline’s `proj/tally` to its private session and uses
 `rig/vpointer.py` for native clicks. It also needs Rust and Tesseract. Select
 an installed OCR language with `--ocr-language` (the default is `eng`).
-It checks the failure, resizes and clicks the panel, corrects the assertion
+It drags the divider at 100% and 150% scale, checks keyboard focus and the
+clicked failure row, and exercises both size limits in a small window. It corrects the assertion
 in the source, reruns the tests, and undoes the correction.
 
 Click in the source to place the caret. Drag to select, or Shift-click to
