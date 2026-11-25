@@ -680,6 +680,7 @@ fn byte_to_position(text: &str, byte: usize, enc: PositionEncoding) -> (u32, u32
 /// `TextEdit`s, diagnostics, hover ranges all nest `Position`s and
 /// are converted uniformly. UTF-8 is a no-op fast path (the offsets
 /// already match), so the recursion is skipped entirely there.
+#[cfg(test)] // E10v.5: production converts by document (`rewrite_positions_by_document`)
 fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncoding) {
     if enc == PositionEncoding::Utf8 {
         return;
@@ -703,6 +704,79 @@ fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncodin
         Value::Array(arr) => {
             for v in arr.iter_mut() {
                 rewrite_positions_to_bytes(v, doc, enc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// E10v.5 (#533): as [`rewrite_positions_to_bytes`], each `Position`
+/// converted against the document it belongs to rather than against one
+/// document for the whole answer. A position's document is named by the
+/// nearest object above it that names one: a `uri` (a `Location`, a
+/// resource op, a `WorkspaceSymbol`'s location), a `targetUri` (a
+/// `LocationLink`, whose `originSelectionRange` stays in `default`, the
+/// requesting document), a `textDocument.uri` (a `TextDocumentEdit`), or a
+/// key of a `WorkspaceEdit`'s `changes`. A position under none of them is
+/// in `default`. `text_of` gives a document's text, `None` when it cannot
+/// be read, and a position whose document has no text or no such line is
+/// left as it came.
+fn rewrite_positions_by_document(
+    value: &mut Value,
+    doc: Option<&std::sync::Arc<str>>,
+    default: Option<&std::sync::Arc<str>>,
+    enc: PositionEncoding,
+    text_of: &mut dyn FnMut(&str) -> Option<std::sync::Arc<str>>,
+) {
+    match value {
+        Value::Object(map) => {
+            let named = map
+                .get("uri")
+                .or_else(|| map.get("targetUri"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    map.get("textDocument")
+                        .and_then(|d| d.get("uri"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned);
+            let own = named.as_deref().map(&mut *text_of);
+            let here = match &own {
+                Some(text) => text.as_ref(),
+                None => doc,
+            };
+            if let (Some(line), Some(character)) = (
+                map.get("line").and_then(Value::as_u64),
+                map.get("character").and_then(Value::as_u64),
+            ) && let Some(line_text) = here.and_then(|d| nth_line(d, line as u32))
+            {
+                let byte = char_to_byte(line_text, character as u32, enc);
+                map.insert("character".into(), Value::from(byte));
+            }
+            for (key, v) in map.iter_mut() {
+                match (key.as_str(), v) {
+                    ("changes", Value::Object(by_uri)) => {
+                        for (u, edits) in by_uri.iter_mut() {
+                            let text = text_of(u);
+                            rewrite_positions_by_document(
+                                edits,
+                                text.as_ref(),
+                                default,
+                                enc,
+                                text_of,
+                            );
+                        }
+                    }
+                    ("originSelectionRange", v) => {
+                        rewrite_positions_by_document(v, default, default, enc, text_of);
+                    }
+                    (_, v) => rewrite_positions_by_document(v, here, default, enc, text_of),
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                rewrite_positions_by_document(v, doc, default, enc, text_of);
             }
         }
         _ => {}
@@ -746,6 +820,22 @@ pub struct LspClient {
     attempt: u32,
     /// When the manager should attempt the next restart, if any.
     next_restart_at: Option<Instant>,
+    /// E10v.2: crashes in a row, each within [`CRASH_COUNT_WINDOW`] of
+    /// its generation's start, whatever the generation answered (the
+    /// owner's ruling of 2026-11-23). A generation that lived longer
+    /// starts the run over, so its own crash counts one. At
+    /// [`MAX_CRASHES`] an `OnCrash` or `Always` server is not restarted
+    /// again (`crash_stopped`).
+    ///
+    /// [`CRASH_COUNT_WINDOW`]: crate::parse_isolation::CRASH_COUNT_WINDOW
+    /// [`MAX_CRASHES`]: crate::parse_isolation::MAX_CRASHES
+    crashes: u32,
+    /// When the current generation's process was started.
+    started_at: Option<Instant>,
+    /// E10v.4b: the user asked for a restart (`lsp.restart`); the exit
+    /// that follows is not a crash, and the next generation starts at once
+    /// with its crash count new.
+    restart_requested: bool,
     /// T M4.5: request ids we sent `$/cancelRequest` for after every
     /// awaiter abandoned them. A server may still answer a cancelled
     /// request (the cancel/response race); a late response whose id
@@ -780,6 +870,9 @@ impl LspClient {
             pending: HashMap::new(),
             attempt: 0,
             next_restart_at: None,
+            crashes: 0,
+            started_at: None,
+            restart_requested: false,
             cancelled_rids: HashSet::new(),
             deferred_notifications: Vec::new(),
             position_encoding: PositionEncoding::default(),
@@ -827,7 +920,8 @@ pub struct LspManager {
     process_to_server: HashMap<ProcessId, LspServerId>,
     /// Per-server pending event buffer.
     pending: HashMap<LspServerId, Vec<LspEvent>>,
-    /// Constant restart back-off (mirrors the supervisor's default).
+    /// The back-off before the first restart after a crash, doubled
+    /// for each further crash in a row (E10v.2).
     restart_backoff: Duration,
     /// T M4.6 diagnostic store. Populated as the manager handles
     /// `textDocument/publishDiagnostics` notifications. Shared with
@@ -945,6 +1039,26 @@ pub struct LspManager {
     /// resurrect an evicted key, which is the whole failure this gate
     /// exists to stop.
     forgotten_documents: std::collections::HashSet<(LspServerId, String)>,
+    /// E10v.1 (#479): the highest `version` a `publishDiagnostics` has
+    /// carried for each `(server, uri)`. A publish below it was computed
+    /// for text older than one the server has already reported on, and
+    /// is dropped; one at it replaces; one with no version takes effect
+    /// and leaves this as it was. Kept across a `did_open` (the owner's
+    /// ruling of 2026-11-23: a reopened document is numbered past it, see
+    /// [`Self::version_floor`]), and dropped with the documents wherever
+    /// a generation's documents go, since a new process publishes nothing
+    /// for a version it was not sent.
+    published_versions: HashMap<(LspServerId, String), i64>,
+    /// E10v fix round 1 (review 1's Medium 2, the owner's ruling of
+    /// 2026-11-23): the highest version the client has sent (`didOpen`,
+    /// `didChange`) or the server has published for each `(server,
+    /// uri)`, kept for the server's life in this daemon: across a buffer
+    /// killed and the file opened again, a `didClose`, a crash and a
+    /// restart. A document opened again is numbered past it, so versions
+    /// never repeat for one URI on one server, and a publish computed
+    /// before the reopen is always below the reopened document's.
+    /// Dropped only when the server is forgotten (ids are never reused).
+    version_floor: HashMap<(LspServerId, String), i64>,
     /// T M4.9: `(project_root, language_id)` → server id. Drives the
     /// "LSP runs per-project, not per-buffer" invariant. Roots are
     /// stored as [`PathBuf`] so callers don't have to canonicalise
@@ -1198,7 +1312,7 @@ impl LspManager {
             documents: HashMap::new(),
             disk_documents: HashMap::new(),
             request_timeout: Duration::from_secs(10),
-            restart_backoff: Duration::from_millis(500),
+            restart_backoff: crate::parse_isolation::CRASH_BACKOFF,
             diag_store: crate::diag::make_shared_store(),
             completion_store: crate::completion::make_shared_store(),
             hover_store: crate::hover::make_shared_store(),
@@ -1216,6 +1330,8 @@ impl LspManager {
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             forgotten_documents: std::collections::HashSet::new(),
+            published_versions: HashMap::new(),
+            version_floor: HashMap::new(),
             project_servers: HashMap::new(),
         }
     }
@@ -1421,7 +1537,8 @@ impl LspManager {
         )
     }
 
-    /// Override the restart back-off. Test helper.
+    /// Override the first restart back-off, which each crash in a row
+    /// doubles (E10v.2). Test helper.
     pub fn set_restart_backoff(&mut self, d: Duration) {
         self.restart_backoff = d;
     }
@@ -1507,6 +1624,7 @@ impl LspManager {
     fn start_generation(&mut self, id: LspServerId, client: &mut LspClient) -> Result<(), String> {
         client.attempt += 1;
         client.next_restart_at = None;
+        client.started_at = Some(Instant::now());
         client.stdout = FrameParser::new();
         client.pending.clear();
         // T M4.5 task #7: the new generation has a fresh request-id
@@ -1530,6 +1648,7 @@ impl LspManager {
         // new `did_open` from the editor's reattach path.
         self.documents.retain(|(s, _), _| *s != id);
         self.disk_documents.retain(|(s, _), _| *s != id);
+        self.published_versions.retain(|(s, _), _| *s != id);
         // dired Stage 2a §5 — the tombstone is generation-scoped: this
         // generation's forgotten pairs go, every other server's stay.
         // The reattach path re-`did_open`s whatever it still holds.
@@ -1721,12 +1840,47 @@ impl LspManager {
     /// `character` is a pmacs byte offset. No cached document (or the
     /// UTF-8 fast path) ⇒ returned unchanged.
     fn inbound_converted(&self, sid: LspServerId, uri: &str, value: &Value) -> Value {
-        let enc = self.position_encoding(sid);
         let mut owned = value.clone();
-        if let Some(doc) = self.documents.get(&(sid, uri.to_owned())) {
-            rewrite_positions_to_bytes(&mut owned, doc, enc);
-        }
+        self.convert_positions_by_document(sid, uri, &mut owned);
         owned
+    }
+
+    /// E10v.5 (#533): every `Position` in `value` from the server's
+    /// encoding to a byte column of its own document's line
+    /// ([`rewrite_positions_by_document`]), `uri` the requesting document
+    /// (empty for `workspace/symbol`, which names none). A document's text
+    /// is the one this server holds for it, the text its positions count
+    /// in, else the file as it is on disk (a file the server read for
+    /// itself, open in no buffer of its); each is read once per answer. A
+    /// UTF-8 server's columns are bytes already, and nothing is read.
+    pub(crate) fn convert_positions_by_document(
+        &self,
+        sid: LspServerId,
+        uri: &str,
+        value: &mut Value,
+    ) {
+        let enc = self.position_encoding(sid);
+        if enc == PositionEncoding::Utf8 {
+            return;
+        }
+        let mut cache: HashMap<String, Option<std::sync::Arc<str>>> = HashMap::new();
+        let mut text_of = |u: &str| -> Option<std::sync::Arc<str>> {
+            cache
+                .entry(u.to_owned())
+                .or_insert_with(|| {
+                    self.documents
+                        .get(&(sid, u.to_owned()))
+                        .cloned()
+                        .or_else(|| {
+                            crate::project_index::uri_to_path(u)
+                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                .map(|t| std::sync::Arc::from(t.as_str()))
+                        })
+                })
+                .clone()
+        };
+        let default = if uri.is_empty() { None } else { text_of(uri) };
+        rewrite_positions_by_document(value, default.as_ref(), default.as_ref(), enc, &mut text_of);
     }
 
     /// Register an async-runtime awaiter for the just-sent request
@@ -2720,7 +2874,8 @@ impl LspManager {
             let Some(client) = self.clients.get_mut(&sid) else {
                 return;
             };
-            let was_shutdown = matches!(client.state, LspClientState::ShuttingDown { .. });
+            let was_shutdown = matches!(client.state, LspClientState::ShuttingDown { .. })
+                || client.restart_requested;
             if was_shutdown {
                 client.state = LspClientState::Stopped { ended: at };
             } else {
@@ -2735,9 +2890,31 @@ impl LspManager {
                 self.process_to_server.remove(&pid);
                 let _ = self.supervisor.borrow_mut().forget(pid);
             }
+            // E10v.4b: a restart the user asked for starts at once, its count
+            // new; the exit it ends is not a crash.
+            if client.restart_requested {
+                client.crashes = 0;
+                client.next_restart_at = Some(at);
+            }
+            // E10v.2: a crash within `CRASH_COUNT_WINDOW` of its
+            // generation's start adds to the run, whatever it answered; a
+            // generation that lived longer starts the run over.
+            if !was_shutdown {
+                let short = client.started_at.is_none_or(|started| {
+                    at.saturating_duration_since(started)
+                        < crate::parse_isolation::CRASH_COUNT_WINDOW
+                });
+                client.crashes = if short {
+                    client.crashes.saturating_add(1)
+                } else {
+                    1
+                };
+            }
             (
                 was_shutdown,
-                !was_shutdown && should_restart(client.spec.restart),
+                !was_shutdown
+                    && should_restart(client.spec.restart)
+                    && client.crashes < crate::parse_isolation::MAX_CRASHES,
             )
         };
         // T M4.5: the server is gone (clean stop or crash) and will
@@ -2747,13 +2924,14 @@ impl LspManager {
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
         self.disk_documents.retain(|(s, _), _| *s != sid);
+        self.published_versions.retain(|(s, _), _| *s != sid);
         if was_shutdown {
             self.push_event(sid, at, LspEventKind::Stopped);
         } else {
             self.push_event(sid, at, LspEventKind::Crashed { reason });
         }
         if restart && let Some(client) = self.clients.get_mut(&sid) {
-            client.next_restart_at = Some(at + self.restart_backoff);
+            client.next_restart_at = Some(at + crash_backoff(self.restart_backoff, client.crashes));
         }
     }
 
@@ -3365,7 +3543,7 @@ impl LspManager {
     /// update [`Self::diag_store`]. Malformed payloads (missing uri
     /// or non-array diagnostics) are ignored --- they're a
     /// server-side bug, not a fatal protocol error.
-    fn absorb_publish_diagnostics(&self, sid: LspServerId, params: &Value) {
+    fn absorb_publish_diagnostics(&mut self, sid: LspServerId, params: &Value) {
         let Some(uri) = params.get("uri").and_then(Value::as_str).map(str::to_owned) else {
             return;
         };
@@ -3384,6 +3562,26 @@ impl LspManager {
         let Some(arr) = params.get("diagnostics").and_then(Value::as_array) else {
             return;
         };
+        // E10v.1 (#479): a publish below the highest version this server
+        // has published for the document was computed for older text,
+        // and arriving last it would replace the answer for newer text
+        // (HLS sends `v24:error` then `v3:[]`). Dropped. An equal
+        // version replaces, so a server's own correction stands; a
+        // publish with no version (the spec's optional field; a
+        // project-wide check names none) takes effect and leaves the
+        // highest seen as it was.
+        if let Some(version) = params.get("version").and_then(Value::as_i64) {
+            let key = (sid, uri.clone());
+            if self
+                .published_versions
+                .get(&key)
+                .is_some_and(|&highest| version < highest)
+            {
+                return;
+            }
+            self.note_version(sid, &uri, version);
+            self.published_versions.insert(key, version);
+        }
         // E7c.3: each diagnostic is placed against the text it was
         // computed for --- the file on disk for a check source, the
         // text last sent for the server's own analysis --- as bytes,
@@ -3456,9 +3654,12 @@ impl LspManager {
             let Some(client) = self.clients.get(&sid) else {
                 return;
             };
-            let LspClientState::Crashed { .. } = &client.state else {
+            let crashed = matches!(client.state, LspClientState::Crashed { .. });
+            let requested =
+                client.restart_requested && matches!(client.state, LspClientState::Stopped { .. });
+            if !crashed && !requested {
                 return;
-            };
+            }
             match client.next_restart_at {
                 Some(at) => at <= now,
                 None => false,
@@ -3478,6 +3679,7 @@ impl LspManager {
         // also borrows `self.process_to_server`) doesn't conflict
         // with the `clients.get_mut` borrow.
         let mut client = self.clients.remove(&sid).expect("checked existence above");
+        client.restart_requested = false;
         // E8d.1: a respawn that cannot spawn (the executable gone, an
         // invalid cwd) is a crash of its own, as `McpManager::maybe_restart`
         // already treats it. `start_generation` has set the client to
@@ -3494,8 +3696,12 @@ impl LspManager {
                 reason: reason.clone(),
                 ended: now,
             };
-            client.next_restart_at = if should_restart(client.spec.restart) {
-                Some(now + self.restart_backoff)
+            // E10v.2: a generation that could not start lived no time.
+            client.crashes = client.crashes.saturating_add(1);
+            client.next_restart_at = if should_restart(client.spec.restart)
+                && client.crashes < crate::parse_isolation::MAX_CRASHES
+            {
+                Some(now + crash_backoff(self.restart_backoff, client.crashes))
             } else {
                 None
             };
@@ -3568,6 +3774,69 @@ impl LspManager {
         self.clients.get(&sid).map(|c| c.attempt)
     }
 
+    /// E10v.4b: restart `sid` at the user's word (`lsp.restart`): a
+    /// running server is terminated and started again at once under the
+    /// same id when its exit is seen; one already gone (crashed, stopped by
+    /// the restart bound) is started at the next tick. Either way the crash
+    /// count is new, and the `Restarting` event the restart emits has the
+    /// editor send the new generation its documents (E10v.3). A server
+    /// stopped by `stop` or `shutdown_all` (a restart disarmed) is
+    /// restarted too: the user asked.
+    pub fn restart(&mut self, sid: LspServerId) -> Result<(), String> {
+        let Some(client) = self.clients.get_mut(&sid) else {
+            return Err(format!("unknown server: {sid}"));
+        };
+        client.restart_requested = true;
+        client.crashes = 0;
+        if let Some(pid) = client.process {
+            let _ = self.supervisor.borrow_mut().terminate(pid);
+            return Ok(());
+        }
+        if !matches!(
+            client.state,
+            LspClientState::Crashed { .. } | LspClientState::Stopped { .. }
+        ) {
+            client.restart_requested = false;
+            return Err(format!("server {sid} has no process to restart"));
+        }
+        client.next_restart_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// E10v.2: crashes in a row, each within
+    /// [`crate::parse_isolation::CRASH_COUNT_WINDOW`] of its start.
+    #[must_use]
+    pub fn crashes(&self, sid: LspServerId) -> Option<u32> {
+        self.clients.get(&sid).map(|c| c.crashes)
+    }
+
+    /// E10v.2: a crashed server whose restart is armed: it is backing
+    /// off and will be started again under the same id.
+    #[must_use]
+    pub fn restart_pending(&self, sid: LspServerId) -> bool {
+        self.clients
+            .get(&sid)
+            .is_some_and(|c| c.next_restart_at.is_some())
+    }
+
+    /// E10v.2: a crashed server its restart policy would restart, not
+    /// restarted because it crashed [`MAX_CRASHES`] times in a row, each
+    /// within [`CRASH_COUNT_WINDOW`] of its start. It stays so until the editor
+    /// replaces it for a file of its project opened again, or the user
+    /// restarts it (`lsp.restart`; `builtin/runtime/lsp.lua`).
+    ///
+    /// [`MAX_CRASHES`]: crate::parse_isolation::MAX_CRASHES
+    /// [`CRASH_COUNT_WINDOW`]: crate::parse_isolation::CRASH_COUNT_WINDOW
+    #[must_use]
+    pub fn crash_stopped(&self, sid: LspServerId) -> bool {
+        self.clients.get(&sid).is_some_and(|c| {
+            matches!(c.state, LspClientState::Crashed { .. })
+                && should_restart(c.spec.restart)
+                && c.next_restart_at.is_none()
+                && c.crashes >= crate::parse_isolation::MAX_CRASHES
+        })
+    }
+
     /// Forget about `sid`. Server must already be in a terminal
     /// state.
     pub fn forget(&mut self, sid: LspServerId) -> Result<(), String> {
@@ -3590,6 +3859,8 @@ impl LspManager {
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
         self.disk_documents.retain(|(s, _), _| *s != sid);
+        self.published_versions.retain(|(s, _), _| *s != sid);
+        self.version_floor.retain(|(s, _), _| *s != sid);
         // dired Stage 2a §5 — terminal removal drops every tombstone
         // this server owned; other servers' pairs are retained.
         self.forgotten_documents.retain(|(s, _)| *s != sid);
@@ -3809,6 +4080,7 @@ impl LspManager {
             });
         self.documents.remove(&(sid, uri.to_owned()));
         self.disk_documents.remove(&(sid, uri.to_owned()));
+        self.published_versions.remove(&(sid, uri.to_owned()));
         Ok(())
     }
 
@@ -3828,14 +4100,28 @@ impl LspManager {
         self.forgotten_documents.len()
     }
 
-    /// Convenience: send `textDocument/didOpen` to `sid`.
+    /// E10v fix round 1: raise `(sid, uri)`'s version floor to `version`.
+    fn note_version(&mut self, sid: LspServerId, uri: &str, version: i64) {
+        let floor = self
+            .version_floor
+            .entry((sid, uri.to_owned()))
+            .or_insert(version);
+        *floor = (*floor).max(version);
+    }
+
+    /// Convenience: send `textDocument/didOpen` to `sid`, and return the
+    /// version it carried: `version`, or one past the highest this
+    /// server has been sent or has published for `uri`, whichever is
+    /// greater (E10v fix round 1, the owner's ruling of 2026-11-23), so a
+    /// document opened again never repeats a version the server has seen.
+    /// The caller numbers its `didChange`s on from what this returns.
     pub fn did_open(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         version: i64,
         text: impl Into<String>,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let language_id = self
             .clients
             .get(&sid)
@@ -3849,6 +4135,14 @@ impl LspManager {
         // must be admitted; another server's tombstone for the same URI
         // is untouched.
         self.forgotten_documents.remove(&(sid, uri.clone()));
+        // E10v fix round 1: numbered past every version seen for it, and
+        // the highest published kept, so a publish for the document as it
+        // was before is below the reopened one's and dropped.
+        let version = self
+            .version_floor
+            .get(&(sid, uri.clone()))
+            .map_or(version, |&floor| version.max(floor.saturating_add(1)));
+        self.note_version(sid, &uri, version);
         // T M4.5 Option B: mirror the document so the position codec
         // can convert per-line between the server's `character` units
         // and pmacs byte offsets.
@@ -3867,7 +4161,8 @@ impl LspManager {
                 "text": text,
             }
         });
-        self.send_notification(sid, "textDocument/didOpen", params)
+        self.send_notification(sid, "textDocument/didOpen", params)?;
+        Ok(version)
     }
 
     /// Send `textDocument/didChange` to `sid` with full text
@@ -3887,6 +4182,7 @@ impl LspManager {
             .insert((sid, uri.clone()), std::sync::Arc::from(text.as_str()));
         self.note_document_synced(&uri);
         self.mark_document_stale(sid, &uri);
+        self.note_version(sid, &uri, version);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -4087,6 +4383,7 @@ impl LspManager {
             .insert((sid, uri.clone()), std::sync::Arc::from(mirror.as_str()));
         self.note_document_synced(&uri);
         self.mark_document_stale(sid, &uri);
+        self.note_version(sid, &uri, version);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -4232,6 +4529,13 @@ fn state_label(state: &LspClientState) -> &'static str {
 
 fn should_restart(policy: LspRestartPolicy) -> bool {
     matches!(policy, LspRestartPolicy::OnCrash | LspRestartPolicy::Always)
+}
+
+/// E10v.2: the back-off before the restart after the `crashes`th crash in
+/// a row, `first` doubled for each crash after the first (E7i's shape for
+/// parse workers, `crate::parse_isolation::CRASH_BACKOFF`).
+fn crash_backoff(first: Duration, crashes: u32) -> Duration {
+    first.saturating_mul(2u32.saturating_pow(crashes.saturating_sub(1)))
 }
 
 fn make_request(id: u64, method: &str, params: Value) -> Vec<u8> {
@@ -4429,7 +4733,7 @@ fn default_capabilities() -> Value {
                     "documentation", "defaultLibrary"
                 ],
             },
-            "publishDiagnostics": { "relatedInformation": true },
+            "publishDiagnostics": { "relatedInformation": true, "versionSupport": true },
         },
     })
 }

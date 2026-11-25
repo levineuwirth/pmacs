@@ -431,6 +431,14 @@ pub const CRASH_BACKOFF: Duration = Duration::from_secs(1);
 /// buffer is not parsed again until it is killed and opened again.
 pub const MAX_CRASHES: u32 = 3;
 
+/// The language-server client's reading of "in a row" (E10v.2, the
+/// owner's ruling of 2026-11-23): a server generation that exits
+/// within this long of its start counts toward [`MAX_CRASHES`], whatever
+/// it answered; one that lived longer starts the count, and with it the
+/// [`CRASH_BACKOFF`] doubling, over. A parse unit has its own measure
+/// (a parse installed), so this one is the LSP client's alone.
+pub const CRASH_COUNT_WINDOW: Duration = Duration::from_secs(30);
+
 /// The settle path's status for a failure text about a crash: `"crashed"`,
 /// `"crash-stopped"` (the crash that ended the buffer's parsing) or
 /// `"held"` (a parse refused for an earlier crash); `None` for any other.

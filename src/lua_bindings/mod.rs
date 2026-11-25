@@ -1418,6 +1418,32 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             Ok(())
         })
     });
+    // E10v.7: `buf:edit_group(fn [, caret, view_top])` runs `fn` and makes
+    // every edit it makes to this buffer one undo step, whatever source
+    // the edits are attributed to (a language server's workspace edit,
+    // applied in an answer's callback, is the daemon's). Given the caret's
+    // byte and the view's first line from before, undoing the step puts
+    // them back. Returns what `fn` returns; an error in `fn` still ends the
+    // group, then propagates.
+    methods.add_method(
+        "edit_group",
+        |lua, this, (f, caret, top): (mlua::Function, Option<u64>, Option<usize>)| {
+            let source = lua_edit_source(lua);
+            let place = caret
+                .zip(top)
+                .map(|(caret, view_top)| crate::buffer::UndoPlace { caret, view_top });
+            with_registry_mut(lua, |r| {
+                resolve_mut(r, this.0)?.edit_group_begin(source, place);
+                Ok(())
+            })?;
+            let result = f.call::<mlua::MultiValue>(());
+            with_registry_mut(lua, |r| {
+                resolve_mut(r, this.0)?.edit_group_end();
+                Ok(())
+            })?;
+            result
+        },
+    );
 }
 
 fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
@@ -10980,6 +11006,11 @@ pub fn install_lsp(
     lua.set_app_data(manager.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
     let lsp_mod = lua.create_table()?;
+    // E10v.2: the restart bound's window, for the sentence that says it.
+    lsp_mod.set(
+        "crash_count_window_ms",
+        u64::try_from(crate::parse_isolation::CRASH_COUNT_WINDOW.as_millis()).unwrap_or(u64::MAX),
+    )?;
 
     {
         // T M4.5 L1: decode a server-returned `file://` URI to a
@@ -11088,11 +11119,13 @@ pub fn install_lsp(
         lsp_mod.set(
             "did_open",
             lua.create_function(
+                // E10v fix round 1: returns the version the `didOpen`
+                // carried, which may be past `version` for a document
+                // opened again; the caller numbers its changes from it.
                 move |_, (id, uri, version, text): (LspServerIdLua, String, i64, String)| {
                     m.borrow_mut()
                         .did_open(id.0, uri, version, text)
-                        .map_err(mlua::Error::external)?;
-                    Ok(())
+                        .map_err(mlua::Error::external)
                 },
             )?,
         )?;
@@ -11652,10 +11685,19 @@ pub fn install_lsp(
         // `{ ops = { … } }` ordered-op shape the rename/code-action
         // surfaces hand back — so the Lua applier has exactly one
         // input format regardless of origin.
+        let m = manager.clone();
         lsp_mod.set(
             "_parse_workspace_edit",
-            lua.create_function(move |lua, edit: Value| {
-                let json = lua_to_json(edit)?;
+            lua.create_function(move |lua, (edit, sid): (Value, Option<LspServerIdLua>)| {
+                let mut json = lua_to_json(edit)?;
+                // E10v.5 (#533): a server's own `workspace/applyEdit`
+                // reaches Lua as the server wrote it, its columns in the
+                // server's encoding; given the server, they are converted
+                // here, each against its own document, as an answer's are.
+                if let Some(sid) = sid {
+                    m.borrow()
+                        .convert_positions_by_document(sid.0, "", &mut json);
+                }
                 let parsed = WorkspaceEditResponse::from_lsp_value(&json);
                 let out = lua.create_table_with_capacity(0, 1)?;
                 out.set("ops", workspace_ops_to_lua(lua, &parsed)?)?;
@@ -11743,9 +11785,26 @@ pub fn install_lsp(
                     if let Some(attempt) = mgr.attempt(*id) {
                         row.set("attempt", attempt)?;
                     }
+                    // E10v.2: the restart bound's state.
+                    if let Some(crashes) = mgr.crashes(*id) {
+                        row.set("crashes", crashes)?;
+                    }
+                    row.set("restart_pending", mgr.restart_pending(*id))?;
+                    row.set("crash_stopped", mgr.crash_stopped(*id))?;
                     out.set(i + 1, row)?;
                 }
                 Ok(out)
+            })?,
+        )?;
+    }
+
+    {
+        // E10v.4b: `pmacs.lsp.restart(id)`, the user's restart.
+        let m = manager.clone();
+        lsp_mod.set(
+            "restart",
+            lua.create_function(move |_, id: LspServerIdLua| {
+                m.borrow_mut().restart(id.0).map_err(mlua::Error::external)
             })?,
         )?;
     }

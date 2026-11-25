@@ -297,6 +297,15 @@ impl CrdtState {
         self.doc.peer_id()
     }
 
+    /// Commit the ops written since the last commit, so that the op log,
+    /// and [`Self::version`] and [`Self::spans_since`] with it, holds
+    /// them. An edit through `Buffer` is committed by its export; a
+    /// buffer's history written into a fresh document when it is upgraded
+    /// to CRDT backing is not exported, and commits by this (#544).
+    pub fn commit(&self) {
+        self.doc.commit();
+    }
+
     /// Insert `s` at byte position `pos` in the body text.
     ///
     /// Byte-addressed, as the M10.2 Day 2 morning audit (Q1 verification)

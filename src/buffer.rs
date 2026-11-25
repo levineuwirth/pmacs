@@ -218,6 +218,8 @@ impl RecordedOps {
 struct SourceGroup {
     spans: Vec<RecordedSpan>,
     seqno: u64,
+    /// E10v.7: the place an edit group was asked from ([`UndoPlace`]).
+    place: Option<UndoPlace>,
 }
 
 #[cfg(feature = "crdt")]
@@ -232,6 +234,7 @@ impl SourceGroup {
                 })
                 .collect(),
             seqno: 0,
+            place: None,
         }
     }
 
@@ -311,6 +314,21 @@ struct UndoEntry {
     /// insert a hook or a script made between two keystrokes is never
     /// swallowed into their group.
     typed: bool,
+    /// E10v.7: where the caret and the view were before the edit group
+    /// this entry closed ([`Buffer::edit_group_end`]), for undo to put
+    /// them back.
+    place: Option<UndoPlace>,
+}
+
+/// E10v.7: the caret's byte and the view's first line in the window that
+/// asked for an edit group, before it ran: what undoing the group puts
+/// back (`EditorCore::undo`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UndoPlace {
+    /// The caret's byte offset.
+    pub caret: u64,
+    /// The view's first line.
+    pub view_top: usize,
 }
 
 /// A reduced [`Edit`] descriptor used by the undo stack.
@@ -324,6 +342,87 @@ struct EditDescription {
     /// Number of bytes inserted at `pre_range.start` to produce the
     /// post-edit rope.
     inserted_len: u64,
+}
+
+impl EditDescription {
+    /// The same edit described from the other side: the range it
+    /// inserted, in the rope it made, and the length of what it replaced
+    /// (#544, the redo stack's states walked forward).
+    #[cfg(feature = "crdt")]
+    fn inverted(self) -> Self {
+        Self {
+            pre_range: Range::new(
+                self.pre_range.start,
+                self.pre_range.start + self.inserted_len,
+            ),
+            inserted_len: self.pre_range.len(),
+        }
+    }
+}
+
+/// #544: a v0.1 history written into a document
+/// ([`Buffer::history_into_crdt`]), for [`Buffer::install_carried_history`].
+#[cfg(feature = "crdt")]
+struct CarriedHistory {
+    crdt: crate::crdt::CrdtState,
+    /// One group per undo entry that changed the text, oldest first, with
+    /// the entry's index on the v0.1 stack.
+    undo: Vec<(usize, SourceGroup)>,
+    /// One group per redo entry that changed the text, in the stack's own
+    /// order (the next redo last).
+    redo: Vec<SourceGroup>,
+}
+
+/// #544: apply one entry's edit to `crdt`, its inserted bytes read from
+/// `after`, the rope the edit made, and return the ops it wrote. Refused
+/// where the description does not fit the texts, or the bytes are not
+/// UTF-8, which the document cannot hold exactly.
+#[cfg(feature = "crdt")]
+fn replay_step(
+    crdt: &crate::crdt::CrdtState,
+    edit: EditDescription,
+    after: &Rope,
+) -> Result<Vec<loro::IdSpan>, String> {
+    let start = edit.pre_range.start;
+    let inserted_end = start + edit.inserted_len;
+    if inserted_end > after.len() {
+        return Err("an entry's edit runs past the text it made".to_owned());
+    }
+    let before = crdt.version();
+    if !edit.pre_range.is_empty() {
+        crdt.delete(start as usize, edit.pre_range.len() as usize)
+            .map_err(|e| format!("an entry's edit: {e}"))?;
+    }
+    if edit.inserted_len > 0 {
+        let mut bytes = vec![0u8; edit.inserted_len as usize];
+        after.slice(start, inserted_end, &mut bytes);
+        let text = String::from_utf8(bytes)
+            .map_err(|_| "an entry inserted text that is not UTF-8".to_owned())?;
+        crdt.insert(start as usize, &text)
+            .map_err(|e| format!("an entry's edit: {e}"))?;
+    }
+    crdt.commit();
+    Ok(crdt.spans_since(&before))
+}
+
+/// #544: one carried step's ops as a closed group with `place`.
+#[cfg(feature = "crdt")]
+fn recorded_group(spans: Vec<loro::IdSpan>, place: Option<UndoPlace>) -> SourceGroup {
+    SourceGroup {
+        place,
+        ..SourceGroup::of(spans.into_iter().map(RecordedOps::Span))
+    }
+}
+
+/// A rope's bytes, read in one slice.
+#[cfg(feature = "crdt")]
+fn rope_bytes(rope: &Rope) -> Vec<u8> {
+    let len = rope.len();
+    let mut bytes = vec![0u8; len as usize];
+    if len > 0 {
+        rope.slice(0, len, &mut bytes);
+    }
+    bytes
 }
 
 /// Provenance of a [`Buffer`]'s name (dired Stage 2a, Q#DR30).
@@ -408,6 +507,12 @@ pub struct Buffer {
     /// entry when the keystroke is noted. The arbiter has the same
     /// rule through its open group, and the two histories agree.
     typed_floor: Option<usize>,
+    /// E10v.7: an open edit group ([`Self::edit_group_begin`]): its
+    /// source, the v0.1 undo depth it began at, and its place.
+    edit_group: Option<(UndoSource, usize, Option<UndoPlace>)>,
+    /// E10v.7: the place of the group the last undo took back, for the
+    /// core to put the caret and the view at ([`Self::take_undone_place`]).
+    undone_place: Option<UndoPlace>,
     /// Cross-peer undo arbiter record (E6c, CRDT mode): per-source
     /// group stacks plus one open group each. Replaces E6.4's single
     /// global loro `UndoManager` group. Every forward edit is recorded
@@ -430,6 +535,13 @@ pub struct Buffer {
     /// Single-threaded, so one slot suffices.
     #[cfg(feature = "crdt")]
     pending_remote: Option<(Vec<RecordedOps>, crate::crdt::ChangeBase)>,
+    /// v0.1 mode (#544): the source of the last undo, whose redo the v0.1
+    /// redo stack is. The stack has no owner while it is the only
+    /// history, since anyone redoes from it; once [`Self::upgrade_to_crdt`]
+    /// carries it into the arbiter, where a redo stack is its undoer's
+    /// alone, it goes to this source.
+    #[cfg(feature = "crdt")]
+    redo_owner: Option<UndoSource>,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -506,12 +618,16 @@ impl Buffer {
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             typed_floor: None,
+            edit_group: None,
+            undone_place: None,
             #[cfg(feature = "crdt")]
             arbiter: HashMap::new(),
             #[cfg(feature = "crdt")]
             arbiter_seq: 0,
             #[cfg(feature = "crdt")]
             pending_remote: None,
+            #[cfg(feature = "crdt")]
+            redo_owner: None,
             file_path: None,
             file_meta: None,
             editing_in_progress: false,
@@ -588,25 +704,41 @@ impl Buffer {
 
     /// Attach a CRDT to an existing rope-only buffer.
     ///
-    /// Materializes a fresh `CrdtState` seeded from the buffer's
-    /// current rope contents. Existing intercepts, marks, views,
-    /// undo stack, revision, and `is_modified` flag are preserved.
-    /// The buffer's `BufferId` is unchanged so existing references
-    /// stay valid.
+    /// Materializes a fresh `CrdtState` holding the buffer's current
+    /// contents. Existing intercepts, marks, views, revision and
+    /// `is_modified` flag are preserved, and the buffer's `BufferId` is
+    /// unchanged so existing references stay valid.
     ///
-    /// **Undo-history loss**: Pre-upgrade entries in the v0.1 undo
-    /// stack (and redo stack) are cleared explicitly during the
-    /// upgrade. Post-upgrade undo routes through the cross-peer
-    /// arbiter (E6c), which records edits by the loro ops they
-    /// produced, and a pre-upgrade edit has no ops to name. Users
-    /// wishing to preserve undo history should attach collaboration
-    /// before making edits, or accept that mid-session collaboration
-    /// loses prior undo state.
+    /// **The undo history is carried** (#544). CRDT-mode undo is the
+    /// cross-peer arbiter's (E6c), which undoes an edit by the loro ops
+    /// it produced, and a v0.1 entry names no ops, so until #544 the
+    /// upgrade cleared the v0.1 stacks: a buffer a language server's
+    /// rename edited while no replica showed it lost the rename's undo at
+    /// its first show, and every buffer lost its history at a replica's
+    /// attach. Now the document is seeded with the oldest entry's text,
+    /// not the current one, and the history is written into it as this
+    /// peer's ops ([`Self::history_into_crdt`]): each undo entry's edit
+    /// in order, recorded as one group of the daemon's carrying the
+    /// entry's place, which the recency pick hands to whoever undoes
+    /// next, as v0.1's one stack was anyone's; then the redo stack's
+    /// states to its furthest and back, each step back a redo group of
+    /// the source that undid last ([`Self::undo_for`] records it), since
+    /// a redo stack is its undoer's. An edit group still open stays open
+    /// for its source with its entries in it. The seed is not undoable,
+    /// as it was not before. Where the history cannot be written exactly
+    /// --- text that is not UTF-8, or a document that does not end at the
+    /// buffer's text --- the document holds the current text and the
+    /// history is cleared, as before, and said on stderr; a carried
+    /// history is said there too, for the developer audit the clearing
+    /// had.
     ///
-    /// Used by M10.8 (multi-frontend instance state) when a v0.1
-    /// frontend's buffer is promoted to CRDT-backed at attach time
-    /// because a v1.0 frontend has joined the session. M10.2 ships
-    /// the API surface; the M10.8 caller wires invocation.
+    /// The history's ops ride in the document, and so in the
+    /// `BufferSnapshot` a replica is sent after the upgrade, which is the
+    /// same message at the same moment as before.
+    ///
+    /// Called at a replica's attach for every buffer not yet backed, at a
+    /// replica's first show of a buffer made after it, and for a
+    /// session's initial target (`src/daemon.rs`).
     ///
     /// Returns an error if the CRDT was already attached (the
     /// "set once" rule); callers should check
@@ -623,39 +755,122 @@ impl Buffer {
                 reason: "buffer is already CRDT-backed".to_owned(),
             });
         }
-        // Materialize CRDT state from the current rope. The rope's
-        // bytes are read in chunks to avoid one large allocation
-        // (matters for the 10MB+ case the M10.1 audit measured at
-        // 92ms cold-path materialization).
-        let rope_len = self.rope.len();
-        let mut bytes = vec![0u8; rope_len as usize];
-        if rope_len > 0 {
-            self.rope.slice(0, rope_len, &mut bytes);
+        let (undo_len, redo_len) = (self.undo.len(), self.redo.len());
+        if undo_len + redo_len > 0 {
+            // eprintln intentionally, for visibility at upgrade time
+            // without taking a dep on pmacs's error surface from inside
+            // the rope/buffer layer.
+            match self.history_into_crdt(peer_id) {
+                Ok(carried) => {
+                    self.install_carried_history(carried);
+                    eprintln!(
+                        "Buffer {} ({:?}): upgrade_to_crdt carried {undo_len} undo + {redo_len} \
+                         redo entries into CRDT mode.",
+                        self.name, self.id
+                    );
+                    return Ok(());
+                }
+                Err(reason) => eprintln!(
+                    "Buffer {} ({:?}): upgrade_to_crdt clearing {undo_len} undo + {redo_len} \
+                     redo entries ({reason}); v0.1 history is not preserved across this CRDT \
+                     mode upgrade.",
+                    self.name, self.id
+                ),
+            }
         }
-        self.crdt = Some(crate::crdt::CrdtState::from_bytes(peer_id, &bytes)?);
-        // Clear the v0.1 undo/redo stacks on upgrade. The pre-upgrade
-        // entries have no op spans for the arbiter to name; leaving
-        // them in self.undo would make them unreachable through
-        // CRDT-mode undo (which bypasses self.undo). Clear explicitly
-        // + log so the data loss is visible.
-        if !self.undo.is_empty() || !self.redo.is_empty() {
-            // The buffer-registry / Lua-binding layer wraps this in
-            // a user-facing notification; the log here is for
-            // developer audit. eprintln intentionally for visibility
-            // at upgrade time without taking a dep on pmacs's error
-            // surface from inside the rope/buffer layer.
-            eprintln!(
-                "Buffer {} ({:?}): upgrade_to_crdt clearing {} undo + {} redo entries; \
-                 v0.1 history is not preserved across CRDT mode upgrade.",
-                self.name,
-                self.id,
-                self.undo.len(),
-                self.redo.len()
-            );
+        // The current text alone, and no history.
+        self.crdt = Some(crate::crdt::CrdtState::from_bytes(
+            peer_id,
+            &rope_bytes(&self.rope),
+        )?);
+        self.undo.clear();
+        self.redo.clear();
+        self.redo_owner = None;
+        Ok(())
+    }
+
+    /// #544: the v0.1 history written into a fresh document as `peer_id`'s
+    /// ops, and the arbiter's records of it, or why it cannot be.
+    ///
+    /// The entries chain: each one's rope and edit give the rope above it,
+    /// the top's the buffer's rope ([`UndoEntry`]). So the document starts
+    /// at the oldest entry's text, and each entry's edit is replayed on it,
+    /// its inserted bytes read from the rope it made, one step a group.
+    /// The redo stack's entries chain the same way above the buffer's
+    /// rope: its states are walked forward to the furthest (inverting each
+    /// entry's edit, no group) and back, each step back a redo group, so
+    /// the document ends at the buffer's text with every record naming ops
+    /// it holds, as if the edits and the undos had been made in CRDT mode.
+    /// An entry whose edit changed nothing makes no op and no group, as a
+    /// no-op edit records none in CRDT mode. Nothing of `self` changes.
+    #[cfg(feature = "crdt")]
+    fn history_into_crdt(&self, peer_id: u64) -> Result<CarriedHistory, String> {
+        let oldest = self.undo.front().map_or(&self.rope, |entry| &entry.rope);
+        let seed = String::from_utf8(rope_bytes(oldest))
+            .map_err(|_| "the oldest text is not UTF-8".to_owned())?;
+        let crdt = crate::crdt::CrdtState::from_bytes(peer_id, seed.as_bytes())
+            .map_err(|e| format!("the oldest text: {e}"))?;
+        crdt.commit();
+        let mut undo = Vec::new();
+        for (index, entry) in self.undo.iter().enumerate() {
+            let after = self
+                .undo
+                .get(index + 1)
+                .map_or(&self.rope, |next| &next.rope);
+            let spans = replay_step(&crdt, entry.edit, after)?;
+            if !spans.is_empty() {
+                undo.push((index, recorded_group(spans, entry.place)));
+            }
+        }
+        for entry in self.redo.iter().rev() {
+            replay_step(&crdt, entry.edit.inverted(), &entry.rope)?;
+        }
+        let mut redo = Vec::new();
+        for (index, entry) in self.redo.iter().enumerate() {
+            let after = self
+                .redo
+                .get(index + 1)
+                .map_or(&self.rope, |next| &next.rope);
+            let spans = replay_step(&crdt, entry.edit, after)?;
+            if !spans.is_empty() {
+                redo.push(recorded_group(spans, None));
+            }
+        }
+        if crdt.materialize_string().as_bytes() != rope_bytes(&self.rope).as_slice() {
+            return Err("the history does not end at the buffer's text".to_owned());
+        }
+        Ok(CarriedHistory { crdt, undo, redo })
+    }
+
+    /// #544: take a carried history in place of the v0.1 stacks. The undo
+    /// groups are the daemon's, oldest first; those of an edit group
+    /// still open are that group, open for its source with its place, as
+    /// [`Self::edit_group_begin`] opens one in CRDT mode, so
+    /// [`Self::edit_group_end`] closes it whole; the redo groups go to the
+    /// source that undid last.
+    #[cfg(feature = "crdt")]
+    fn install_carried_history(&mut self, carried: CarriedHistory) {
+        let CarriedHistory { crdt, undo, redo } = carried;
+        self.crdt = Some(crdt);
+        let open = self.edit_group;
+        let mut held = SourceGroup::default();
+        for (index, group) in undo {
+            match open {
+                Some((_, floor, _)) if index >= floor => held.spans.extend(group.spans),
+                _ => self.push_group(UndoSource::Daemon, group),
+            }
+        }
+        if let Some((source, _, place)) = open {
+            held.place = place;
+            self.arbiter.entry(source).or_default().open = Some(held);
+        }
+        if !redo.is_empty() {
+            let owner = self.redo_owner.unwrap_or(UndoSource::Daemon);
+            self.arbiter.entry(owner).or_default().redo.extend(redo);
         }
         self.undo.clear();
         self.redo.clear();
-        Ok(())
+        self.redo_owner = None;
     }
 
     /// Whether this buffer is CRDT-backed.
@@ -886,6 +1101,7 @@ impl Buffer {
         {
             self.arbiter.clear();
             self.pending_remote = None;
+            self.redo_owner = None;
         }
     }
 
@@ -1695,8 +1911,13 @@ impl Buffer {
                     inserted_len,
                 },
                 typed: false,
+                place: None,
             });
             self.redo.clear();
+            #[cfg(feature = "crdt")]
+            {
+                self.redo_owner = None;
+            }
         }
         #[cfg(not(feature = "crdt"))]
         let _ = source;
@@ -1794,7 +2015,57 @@ impl Buffer {
                 inserted_len,
             },
             typed: false,
+            place: None,
         });
+    }
+
+    /// E10v.7: open one undo group for every edit `source` makes on this
+    /// buffer until [`Self::edit_group_end`], whatever runs between: a
+    /// language server's workspace edit, applied edit by edit in an
+    /// answer's callback where no command is in scope, so each edit was a
+    /// daemon group of its own and one undo took back one edit. `place` is
+    /// what undoing the group puts back. In CRDT mode the source's open
+    /// group is this one, and the daemon's edits, which close every open
+    /// group, do not close it; in v0.1 mode the entries pushed between
+    /// begin and end collapse into one.
+    pub fn edit_group_begin(&mut self, source: UndoSource, place: Option<UndoPlace>) {
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            self.arbiter_close(source);
+            self.arbiter.entry(source).or_default().open = Some(SourceGroup {
+                place,
+                ..SourceGroup::default()
+            });
+        }
+        self.typed_floor = Some(self.undo.len());
+        self.edit_group = Some((source, self.undo.len(), place));
+    }
+
+    /// E10v.7: close the group [`Self::edit_group_begin`] opened. A group
+    /// that took no edit leaves nothing.
+    pub fn edit_group_end(&mut self) {
+        let Some((source, floor, place)) = self.edit_group.take() else {
+            return;
+        };
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            self.typed_floor = None;
+            self.arbiter_close(source);
+            return;
+        }
+        let _ = source;
+        self.collapse_typed_command();
+        if self.undo.len() > floor
+            && let Some(top) = self.undo.back_mut()
+        {
+            top.place = place;
+        }
+    }
+
+    /// E10v.7: the place of the group the last undo took back, if it was
+    /// an edit group that had one; taken, so it is read once.
+    pub fn take_undone_place(&mut self) -> Option<UndoPlace> {
+        self.undone_place.take()
     }
 
     /// Open (or continue) `source`'s amalgamation run (E6c; E6.4's
@@ -1943,9 +2214,14 @@ impl Buffer {
             }
         }
         if source == UndoSource::Daemon {
+            let held = self.edit_group.map(|(held, _, _)| held);
             let sources: Vec<UndoSource> = self.arbiter.keys().copied().collect();
             for open_source in sources {
-                self.arbiter_close(open_source);
+                // E10v.7: the daemon's own open edit group gathers the
+                // daemon's edits until it is ended.
+                if Some(open_source) != held {
+                    self.arbiter_close(open_source);
+                }
             }
         }
         let stacks = self.arbiter.entry(source).or_default();
@@ -2010,6 +2286,7 @@ impl Buffer {
     /// onto the redo stack.
     fn undo_v01(&mut self) -> Result<Edit, BufferError> {
         let entry = self.undo.pop_back().ok_or(BufferError::NothingToUndo)?;
+        self.undone_place = entry.place;
 
         // The pre-edit rope held in `entry.rope` becomes current. The
         // inverse edit affects the post-state's range
@@ -2031,6 +2308,7 @@ impl Buffer {
                 inserted_len: inverse_inserted_len,
             },
             typed: false,
+            place: None,
         });
         self.is_modified = !self.undo.is_empty();
         self.revision = self.revision.wrapping_add(1);
@@ -2080,6 +2358,7 @@ impl Buffer {
                 inserted_len: inverse_inserted_len,
             },
             typed: false,
+            place: None,
         });
         self.is_modified = true;
         self.revision = self.revision.wrapping_add(1);
@@ -2175,7 +2454,12 @@ impl Buffer {
         }
         #[cfg(not(feature = "crdt"))]
         let _ = source;
-        self.undo_v01()
+        let undone = self.undo_v01();
+        #[cfg(feature = "crdt")]
+        if undone.is_ok() {
+            self.redo_owner = Some(source);
+        }
+        undone
     }
 
     /// Redo `source`'s most recently undone group (E6c). Symmetric to
@@ -2263,6 +2547,10 @@ impl Buffer {
                     HistoryStep::Undo => BufferError::NothingToUndo,
                     HistoryStep::Redo => BufferError::NothingToRedo,
                 })?;
+            self.undone_place = match step {
+                HistoryStep::Undo => group.place,
+                HistoryStep::Redo => None,
+            };
             let (carried, change) = crdt.capture(|| {
                 let mut carry = crate::crdt::ChangeBase::default();
                 for recorded in group.spans.into_iter().rev() {
@@ -2717,6 +3005,71 @@ impl From<loro::LoroEncodeError> for BufferError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E10v.7: the daemon's edits inside an edit group, which close every
+    /// other open group, are one undo step together, and undoing it hands
+    /// back the place the group was opened with. A frontend's undo takes
+    /// the daemon's newest group (the recency pick), as it takes a
+    /// language server's rename applied in an answer's callback.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn e10v_7_daemon_edits_in_an_edit_group_are_one_undo_with_its_place() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*group*", b"one two three");
+        b.upgrade_to_crdt(7).expect("upgrade");
+        let place = UndoPlace {
+            caret: 5,
+            view_top: 0,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        b.apply_edit(EditOp::Insert {
+            pos: 13,
+            bytes: b"!",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"> ",
+        })
+        .unwrap();
+        b.edit_group_end();
+        assert_eq!(rope_string(&b), "> one two three!");
+        let frontend = UndoSource::Frontend(crate::protocol::FrontendId::LOCAL);
+        b.undo_for(frontend).expect("undo");
+        assert_eq!(
+            rope_string(&b),
+            "one two three",
+            "one undo takes both edits"
+        );
+        assert_eq!(b.take_undone_place(), Some(place));
+    }
+
+    /// E10v.7, v0.1 mode: the entries an edit group pushed collapse into
+    /// one, which carries the place.
+    #[test]
+    fn e10v_7_an_edit_group_is_one_v01_undo_with_its_place() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*group*", b"one two three");
+        let place = UndoPlace {
+            caret: 4,
+            view_top: 2,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        b.apply_edit(EditOp::Insert {
+            pos: 13,
+            bytes: b"!",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"> ",
+        })
+        .unwrap();
+        b.edit_group_end();
+        b.undo().expect("undo");
+        let mut text = vec![0u8; usize::try_from(b.len()).unwrap()];
+        b.snapshot_rope().slice(0, b.len(), &mut text);
+        assert_eq!(text, b"one two three", "one undo takes both edits");
+        assert_eq!(b.take_undone_place(), Some(place));
+    }
     use crate::view::View;
     use std::sync::Mutex;
 
@@ -3640,14 +3993,14 @@ mod tests {
 
     #[cfg(feature = "crdt")]
     #[test]
-    fn crdt_upgrade_to_crdt_clears_v01_history() {
-        // T M10.4 reframe: upgrade_to_crdt clears v0.1 undo/redo
-        // stacks explicitly. The pre-upgrade entries can't be
-        // replayed through UndoManager (no peer_id attribution); the
-        // M10.4 audit doc records this as documented behavior with
-        // a v0.2+ refinement path. This test pins the cleared-stack
-        // behavior so future contributors don't reintroduce silent-
-        // persist-but-unreachable semantics.
+    fn crdt_upgrade_to_crdt_carries_v01_history() {
+        // #544: upgrade_to_crdt carries the v0.1 history into the
+        // arbiter. Until E10v's fix round 2 this row was
+        // `crdt_upgrade_to_crdt_clears_v01_history` and pinned T M10.4's
+        // reframe, the history cleared: an undo straight after the
+        // upgrade said NothingToUndo. Amended there and nowhere else; the
+        // v0.1 stacks are still empty after the upgrade, what they held
+        // being the arbiter's now.
         let mut b = Buffer::from_bytes(BufferId::next(), "*upgrade*", b"initial");
         b.apply_edit(EditOp::Insert {
             pos: 7,
@@ -3667,13 +4020,17 @@ mod tests {
         // didn't change at upgrade time; revision tracks rope-version
         // not history).
         assert_eq!(b.revision(), pre_upgrade_rev);
-        // v0.1 undo/redo stacks cleared per M10.4 reframe.
         assert!(b.undo.is_empty());
         assert!(b.redo.is_empty());
-        // CRDT-mode undo has nothing yet (the seeded content from
-        // upgrade isn't an undoable edit — see CrdtState::from_bytes).
-        let undo_result = b.undo();
-        assert!(matches!(undo_result, Err(BufferError::NothingToUndo)));
+        // The carried entry is a group of the daemon's, so the daemon's
+        // own undo takes it; the seed below it is not undoable.
+        b.undo().expect("the carried entry undoes");
+        assert_eq!(rope_string(&b), "initial");
+        assert_invariant(&b);
+        assert!(matches!(b.undo(), Err(BufferError::NothingToUndo)));
+        b.redo().expect("and redoes");
+        assert_eq!(rope_string(&b), "initial content");
+        assert_invariant(&b);
 
         // Subsequent edits on the upgraded buffer keep the invariant
         // and ARE undoable via CRDT-mode undo.
@@ -3686,6 +4043,258 @@ mod tests {
         b.undo().expect("undo the delete");
         assert_eq!(rope_string(&b), "initial content");
         assert_invariant(&b);
+    }
+
+    /// #544, the pass's case at the buffer: E10v.7's edit group made in
+    /// v0.1 mode (a rename's edits in a buffer no replica has shown) is
+    /// one entry with its place; after the upgrade a frontend's undo
+    /// takes it whole, as the daemon's newest group, and hands back the
+    /// place, and that frontend's redo puts it back whole.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_carries_an_edit_group_as_one_undo_with_its_place() {
+        let original = "fn other(total: u32) -> u32 { total }\n";
+        let mut b = Buffer::from_bytes(BufferId::next(), "b.rs", original.as_bytes());
+        let place = UndoPlace {
+            caret: 0,
+            view_top: 0,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        for range in [Range::new(30, 35), Range::new(9, 14)] {
+            b.apply_edit(EditOp::Replace { range, bytes: b"n" })
+                .unwrap();
+        }
+        b.edit_group_end();
+        let renamed = "fn other(n: u32) -> u32 { n }\n";
+        assert_eq!(rope_string(&b), renamed, "premise");
+        assert_eq!(
+            b.undo.len(),
+            1,
+            "premise: one v0.1 entry, as the pass logged"
+        );
+
+        b.upgrade_to_crdt(1).expect("upgrade");
+        let gpu = UndoSource::Frontend(crate::protocol::FrontendId(4));
+        b.undo_for(gpu).expect("one undo");
+        assert_eq!(rope_string(&b), original, "one undo takes the group back");
+        assert_eq!(b.take_undone_place(), Some(place), "with its place");
+        assert_invariant(&b);
+        b.redo_for(gpu).expect("one redo");
+        assert_eq!(rope_string(&b), renamed, "one redo puts it back whole");
+        assert_invariant(&b);
+    }
+
+    /// #544: the v0.1 redo stack is carried to the source that last
+    /// undid, since a redo stack in CRDT mode is its undoer's: that
+    /// source's redo puts each state back in turn, and another source
+    /// has nothing to redo.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_carries_the_redo_stack_to_the_source_that_undid() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*redo*", b"abc");
+        b.apply_edit(EditOp::Insert {
+            pos: 3,
+            bytes: b"d",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Insert {
+            pos: 4,
+            bytes: b"e",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Delete {
+            range: Range::new(0, 1),
+        })
+        .unwrap();
+        let tui = UndoSource::Frontend(crate::protocol::FrontendId(2));
+        let gpu = UndoSource::Frontend(crate::protocol::FrontendId(3));
+        b.undo_for(tui).unwrap();
+        b.undo_for(tui).unwrap();
+        assert_eq!(rope_string(&b), "abcd", "premise");
+        assert_eq!((b.undo.len(), b.redo.len()), (1, 2), "premise");
+
+        b.upgrade_to_crdt(1).expect("upgrade");
+        assert_invariant(&b);
+        assert!(matches!(b.redo_for(gpu), Err(BufferError::NothingToRedo)));
+        b.redo_for(tui).unwrap();
+        assert_eq!(rope_string(&b), "abcde");
+        b.redo_for(tui).unwrap();
+        assert_eq!(rope_string(&b), "bcde");
+        assert!(matches!(b.redo_for(tui), Err(BufferError::NothingToRedo)));
+        b.undo_for(tui).unwrap();
+        b.undo_for(tui).unwrap();
+        b.undo_for(gpu).unwrap();
+        assert_eq!(rope_string(&b), "abc", "the carried entry below them");
+        assert_invariant(&b);
+    }
+
+    /// #544: an undo of a carried entry is a daemon-peer op a replica
+    /// seeded from the upgraded buffer's snapshot imports, its text then
+    /// the undone text: the history's ops ride in the snapshot.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_a_replica_imports_the_undo_of_a_carried_entry() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*replica*", b"one two");
+        b.apply_edit(EditOp::Replace {
+            range: Range::new(4, 7),
+            bytes: b"three",
+        })
+        .unwrap();
+        b.upgrade_to_crdt(1).expect("upgrade");
+        let replica = crate::crdt::CrdtState::new(9).expect("replica");
+        replica
+            .import_snapshot(
+                &b.crdt_state()
+                    .expect("backed")
+                    .export_snapshot()
+                    .expect("snapshot"),
+            )
+            .expect("import the snapshot");
+        assert_eq!(replica.materialize_string(), "one three", "premise");
+        let gpu = UndoSource::Frontend(crate::protocol::FrontendId(3));
+        let edit = b.undo_for(gpu).expect("undo");
+        let op = edit.crdt_op.expect("the undo is an op");
+        assert_eq!(op.peer_id, 1, "on the daemon's peer");
+        replica.import_updates(&op.bytes).expect("import the undo");
+        assert_eq!(replica.materialize_string(), "one two");
+        assert_eq!(rope_string(&b), "one two");
+    }
+
+    /// #544: an edit group still open at the upgrade stays one group: the
+    /// entries it took before and the edits after are one undo, with its
+    /// place, and the entry before it is the next undo.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_inside_an_open_edit_group_keeps_it_one_group() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*open*", b"abc");
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"x",
+        })
+        .unwrap();
+        let place = UndoPlace {
+            caret: 1,
+            view_top: 0,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        b.apply_edit(EditOp::Insert {
+            pos: 4,
+            bytes: b"y",
+        })
+        .unwrap();
+        b.upgrade_to_crdt(1).expect("upgrade");
+        b.apply_edit(EditOp::Insert {
+            pos: 5,
+            bytes: b"z",
+        })
+        .unwrap();
+        b.edit_group_end();
+        assert_eq!(rope_string(&b), "xabcyz", "premise");
+        let gpu = UndoSource::Frontend(crate::protocol::FrontendId(3));
+        b.undo_for(gpu).unwrap();
+        assert_eq!(rope_string(&b), "xabc", "the group whole");
+        assert_eq!(b.take_undone_place(), Some(place));
+        b.undo_for(gpu).unwrap();
+        assert_eq!(rope_string(&b), "abc");
+        assert_invariant(&b);
+    }
+
+    /// #544: a history the document cannot hold exactly (text that is not
+    /// UTF-8) is cleared, as every history was before, and the buffer is
+    /// still backed.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_of_text_that_is_not_utf8_clears_the_history_as_before() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*bytes*", b"ok \xff");
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"so ",
+        })
+        .unwrap();
+        b.upgrade_to_crdt(1).expect("upgrade");
+        assert!(b.is_crdt_backed());
+        assert!(b.undo.is_empty() && b.redo.is_empty());
+        assert!(matches!(b.undo(), Err(BufferError::NothingToUndo)));
+    }
+
+    /// #544: a v0.1 history of mixed edits and undos, carried, undoes and
+    /// redoes step for step as the v0.1 stack it came from does, from
+    /// the redo stack's top down to the seed and back up.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn crdt_upgrade_carried_history_agrees_with_the_v01_stack_step_for_step() {
+        let start = b"the quick brown fox\njumps over\nthe lazy dog\n";
+        let mut carried = Buffer::from_bytes(BufferId::next(), "carried", start);
+        let mut oracle = Buffer::from_bytes(BufferId::next(), "oracle", start);
+        let mut seed = 0x9e37_79b9_u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n.max(1)
+        };
+        let alphabet = b"abcxyz \n";
+        for _ in 0..60 {
+            let len = oracle.len();
+            let at = next(len + 1);
+            let width = next(4).min(len - at);
+            let text: Vec<u8> = (0..next(4))
+                .map(|_| alphabet[next(alphabet.len() as u64) as usize])
+                .collect();
+            let kind = next(3);
+            let op = || match kind {
+                0 => EditOp::Insert {
+                    pos: at,
+                    bytes: &text,
+                },
+                1 => EditOp::Delete {
+                    range: Range::new(at, at + width),
+                },
+                _ => EditOp::Replace {
+                    range: Range::new(at, at + width),
+                    bytes: &text,
+                },
+            };
+            carried.apply_edit(op()).unwrap();
+            oracle.apply_edit(op()).unwrap();
+        }
+        for _ in 0..7 {
+            carried.undo().unwrap();
+            oracle.undo().unwrap();
+        }
+        let (undo_len, redo_len) = (oracle.undo.len(), oracle.redo.len());
+        assert!(
+            undo_len > 20 && redo_len == 7,
+            "premise: {undo_len}, {redo_len}"
+        );
+        carried.upgrade_to_crdt(1).expect("upgrade");
+        assert_invariant(&carried);
+        let same = |carried: &Buffer, oracle: &Buffer, at: &str| {
+            assert_eq!(rope_string(carried), rope_string(oracle), "{at}");
+            assert_invariant(carried);
+        };
+        for i in 0..3 {
+            carried.redo().unwrap();
+            oracle.redo().unwrap();
+            same(&carried, &oracle, &format!("redo {i}"));
+        }
+        let mut undone = 0;
+        while oracle.undo().is_ok() {
+            carried
+                .undo()
+                .expect("the carried history holds as many undos");
+            undone += 1;
+            same(&carried, &oracle, &format!("undo {undone}"));
+        }
+        assert!(carried.undo().is_err(), "and no more");
+        assert_eq!(rope_string(&carried).as_bytes(), start, "down to the seed");
+        let mut redone = 0;
+        while oracle.redo().is_ok() {
+            carried.redo().expect("as many redos");
+            redone += 1;
+            same(&carried, &oracle, &format!("redo after {redone}"));
+        }
+        assert!(carried.redo().is_err());
     }
 
     #[cfg(feature = "crdt")]

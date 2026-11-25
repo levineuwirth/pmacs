@@ -1,0 +1,38 @@
+{
+ "source": "~/build/e10m/hls-215-fixed/run-2/wire.jsonl, lines 84 and 105: HLS 2.15.0.0's two publishes for app/Main.hs, the URI removed (#479)",
+ "publishes": [
+  {
+   "diagnostics": [
+    {
+     "code": "GHC-83865",
+     "codeDescription": {
+      "href": "https://errors.haskell.org/messages/GHC-83865"
+     },
+     "data": {
+      "attachedReason": [
+       "-Wdeferred-type-errors"
+      ]
+     },
+     "message": "• Couldn't match expected type ‘Int’ with actual type ‘Bool’\n• In the expression: True\n  In an equation for ‘oops’: oops = True",
+     "range": {
+      "end": {
+       "character": 11,
+       "line": 8
+      },
+      "start": {
+       "character": 7,
+       "line": 8
+      }
+     },
+     "severity": 1,
+     "source": "typecheck"
+    }
+   ],
+   "version": 24
+  },
+  {
+   "diagnostics": [],
+   "version": 3
+  }
+ ]
+}
