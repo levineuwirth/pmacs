@@ -350,3 +350,9 @@ whole. Under one cap a growing register squeezes the rules.
   the project sidebar is still in force: a sidebar root is a new root
   convention and waits on the workspace object, and only restore was
   released from that gate (D16).
+
+- The paired GPUI trial daemon can visit a parsed compilation location on
+  a plain click in a mapped graphical output panel. The trial launcher
+  enables `compile.click-to-visit` in its private config. The default is
+  off. An attached TUI and older panel sessions visit with Enter. The
+  compiler rules, source placement and jump history are shared.

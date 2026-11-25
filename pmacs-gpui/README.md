@@ -43,6 +43,13 @@ were using keeps keyboard focus. Use the arrow keys or wheel to read the output.
 `cursor.buffer-end` jumps to the final test summary. Press `Ctrl-x o` again
 to edit the source. Save with `Ctrl-x Ctrl-s` and run `compile.recompile`.
 
+With the paired trial daemon, set `pmacs.config.set("compile.click-to-visit", true)`
+in your trial init.lua. Run `cargo rustc --message-format=short -- -Dunused-variables`
+in the ledger project. Click the diagnostic row containing `src/ledger.rs:54:13`
+to edit the unused variable. `Alt-,` returns to the same output panel. The daemon
+uses its configured compiler rules and the build's working directory. With the
+stock daemon, click the location and press Enter.
+
 The panel paints the daemon’s cell frame, including its line numbers and mode
 line. On the baseline daemon, a click in a numbered output row can place the
 caret to the right by the gutter width. For precise positioning there, toggle
@@ -64,6 +71,10 @@ an installed OCR language with `--ocr-language` (the default is `eng`).
 It drags the divider at 100% and 150% scale, checks keyboard focus and the
 clicked failure row, and exercises both size limits in a small window. It corrects the assertion
 in the source, reruns the tests, and undoes the correction.
+
+Use `--diagnostic-baseline /path/to/pmacs-baseline` with the paired daemon to
+check single-click navigation at both display scales. The test saves an edit at
+the reported column in a different file, undoes it, and jumps back.
 
 Click in the source to place the caret. Drag to select, or Shift-click to
 extend the selection. Clicks in an expanded tab land at the nearer edge of

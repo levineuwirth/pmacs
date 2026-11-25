@@ -68,6 +68,12 @@ define {
 }
 
 define {
+  name = "window.panel-click",
+  description = "A plain click completed on the focused document panel's mapped cell. Return false to claim it.",
+  kind = "short-circuit",
+}
+
+define {
   name = "path.open-directory",
   description = "Fired when a directory path is opened (Journey Stage 1a). " ..
                 "Receives the canonical absolute path and an opaque " ..

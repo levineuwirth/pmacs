@@ -184,6 +184,7 @@ impl FileView {
             self.prompt_scroll = UniformListScrollHandle::new();
         }
         if let Some(p) = &prompt {
+            self.panel.cancel_press();
             self.panel.end_drag();
             self.source_drag = None;
             p.reveal_selected(&self.prompt_scroll);
@@ -244,6 +245,7 @@ impl FileView {
     }
 
     fn source_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.panel.track_press(event.position);
         if event.pressed_button == Some(MouseButton::Left) && self.drag_panel(event.position.y, cx)
         {
             return;
@@ -259,6 +261,7 @@ impl FileView {
     }
 
     fn source_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.panel.cancel_press();
         if self.drag_panel(event.position.y, cx) {
             self.panel.end_drag();
             cx.notify();
@@ -619,6 +622,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     cx.observe_window_activation(window, |view: &mut FileView, w, cx| {
                         if !w.is_window_active() {
                             view.source_drag = None;
+                            view.panel.cancel_press();
                             view.panel.end_drag();
                         }
                         if let Some(client) = &view.client

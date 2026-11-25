@@ -173,6 +173,9 @@ pub struct AcceptedPanelGesture {
     /// The last coordinate known valid for this gesture — where a
     /// release is delivered when the pointer has since left content.
     pub coord: pmacs_protocol::CellCoord,
+    /// A plain mapped press can activate its cell on a matching release.
+    /// Any drag disarms activation, including a drag back to the start.
+    pub plain_click: bool,
     /// The panel buffer the gesture belongs to.
     pub buffer_id: BufferId,
     /// The domain the accepted press RESOLVED INTO, and which every
@@ -957,6 +960,13 @@ impl SemanticRenderState {
     pub fn note_gesture_content_cell(&mut self, coord: pmacs_protocol::CellCoord) {
         if let Some(gesture) = self.accepted_gesture.as_mut() {
             gesture.coord = coord;
+        }
+    }
+
+    /// A drag can still complete its selection or deliver the child's release.
+    pub fn disarm_panel_click(&mut self) {
+        if let Some(gesture) = self.accepted_gesture.as_mut() {
+            gesture.plain_click = false;
         }
     }
 

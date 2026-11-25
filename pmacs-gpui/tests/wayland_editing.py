@@ -61,15 +61,18 @@ def exercise(args, runtime, processes):
     config_dir = Path(env["XDG_CONFIG_HOME"]) / "pmacs"
     config_dir.mkdir()
     config_text = "pmacs.lsp.config = {}\n"
+    if args.diagnostic_baseline:
+        config_text += 'pmacs.config.set("compile.click-to-visit", true)\n'
     if args.completion_ledger:
         from wayland_completion import PROVIDER
         config_text += PROVIDER
     (config_dir / "init.lua").write_text(config_text)
 
-    if args.build_baseline:
+    project = args.build_baseline or args.diagnostic_baseline
+    if project:
         for name in ("Cargo.toml", "Cargo.lock"):
-            shutil.copyfile(args.build_baseline / "proj/tally" / name, runtime / name)
-        shutil.copytree(args.build_baseline / "proj/tally/src", runtime / "src")
+            shutil.copyfile(project / "proj/tally" / name, runtime / name)
+        shutil.copytree(project / "proj/tally/src", runtime / "src")
         toolchain = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
         env["PATH"] = f"{toolchain}/bin:{env['PATH']}"
         env["CARGO_NET_OFFLINE"] = "true"
@@ -89,7 +92,7 @@ def exercise(args, runtime, processes):
         source_selection(args, runtime, run, launch, wait_for)
         return
 
-    if args.build_baseline:
+    if project:
         path = runtime / "src/ledger_tests.rs"
     else:
         path = runtime / "ledger.rs"
@@ -191,6 +194,10 @@ def exercise(args, runtime, processes):
     if args.completion_ledger:
         from wayland_completion import exercise_completion
         exercise_completion(path, run, key, shot, wait_for)
+    if args.diagnostic_baseline:
+        from wayland_diagnostic import visit_diagnostic
+        visit_diagnostic(path, out, run, key, shot, args.ocr_language,
+                         project.resolve() / "rig/vpointer.py", wait_for)
     if args.build_baseline:
         from wayland_build import build_panel
         build_panel(path, out, run, key, shot, pane, args.ocr_language,
@@ -206,6 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--pmacs", type=Path, required=True)
     parser.add_argument("--gpui", type=Path, required=True)
     fixtures = parser.add_mutually_exclusive_group()
+    fixtures.add_argument("--diagnostic-baseline", type=Path, help="visit a rustc location in the baseline ledger with a paired daemon")
     fixtures.add_argument("--build-baseline", type=Path, help="also exercise the build panel using proj/tally and rig/vpointer.py from this baseline directory")
     fixtures.add_argument("--completion-ledger", type=Path, help="check prefix-anchored completion on a disposable copy of the ledger at two scales")
     fixtures.add_argument("--selection-baseline", type=Path, help="compare source gestures on the baseline ledger and Unicode fixture using rig/vpointer.py")

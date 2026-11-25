@@ -73,7 +73,15 @@ struct DividerDrag {
     last_rows: u32,
 }
 
+struct PanelPress {
+    mapping: Mapping,
+    cell: CellCoord,
+    position: Point<Pixels>,
+    mods: Modifiers,
+}
+
 pub struct Panel {
+    press: Option<PanelPress>,
     drag: Option<DividerDrag>,
     version: u32,
     geometry: u64,
@@ -88,6 +96,7 @@ pub struct Panel {
 impl Panel {
     pub fn new(version: u32) -> Self {
         Self {
+            press: None,
             drag: None,
             version,
             geometry: 0,
@@ -126,6 +135,7 @@ impl Panel {
             || self.advance != advance
             || self.total != total
         {
+            self.cancel_press();
             self.drag = None;
             let Some(epoch) = self.geometry.checked_add(1) else {
                 // Disown the old cell range so a late frame cannot restore it.
@@ -147,6 +157,7 @@ impl Panel {
     pub fn apply(&mut self, payload: PanelFramePayload) -> bool {
         let (frame, generation) = match payload {
             PanelFramePayload::Absent => {
+                self.cancel_press();
                 self.drag = None;
                 self.wheel_remainder = 0.;
                 return self.visible.take().is_some();
@@ -204,6 +215,19 @@ impl Panel {
         self.visible.is_some()
     }
 
+    pub fn cancel_press(&mut self) {
+        self.press = None;
+    }
+
+    pub fn track_press(&mut self, position: Point<Pixels>) {
+        if self.press.as_ref().is_some_and(|press| {
+            (position.x - press.position.x).abs() > px(4.)
+                || (position.y - press.position.y).abs() > px(4.)
+        }) {
+            self.cancel_press();
+        }
+    }
+
     pub fn end_drag(&mut self) -> bool {
         self.drag.take().is_some()
     }
@@ -237,7 +261,8 @@ impl Panel {
                 grid,
             )
         };
-        let click_hit = hit.clone();
+        let press_hit = hit.clone();
+        let release_hit = hit.clone();
         let body = div()
             .w_full()
             .h(px(ROW * grid.rows as f32))
@@ -245,11 +270,30 @@ impl Panel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
-                    if let Some(cell) = click_hit(event.position) {
-                        view.panel_input(
+                    if let Some(cell) = press_hit(event.position)
+                        && view.accepts_panel_input(mapping)
+                    {
+                        view.panel.press = Some(PanelPress {
                             mapping,
                             cell,
-                            input::modifiers(event.modifiers),
+                            position: event.position,
+                            mods: input::modifiers(event.modifiers),
+                        });
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |view, event: &gpui::MouseUpEvent, _, cx| {
+                    if let Some(press) = view.panel.press.take()
+                        && press.mapping == mapping
+                        && release_hit(event.position) == Some(press.cell)
+                    {
+                        view.panel_input(
+                            mapping,
+                            press.cell,
+                            press.mods | input::modifiers(event.modifiers),
                             &[
                                 MouseKind::Down(WireButton::Left),
                                 MouseKind::Up(WireButton::Left),
