@@ -15341,8 +15341,9 @@ fn install_minibuffer_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table
 /// D18 (E6.1): what RET commits, from a `pmacs.minibuffer.read` spec's
 /// `accept`. `candidate` is the default so a prompt that says nothing
 /// keeps the picker semantics it always had; the open-set prompts name
-/// `typed` themselves; `key` (E7b.2) is the one-keypress answer of
-/// `y_or_n`.
+/// `typed` themselves, where RET takes the field unless the user moved
+/// the selection since it last changed (E10aa); `key` (E7b.2) is the
+/// one-keypress answer of `y_or_n`.
 fn parse_accept_policy(spec: &Table) -> mlua::Result<crate::minibuffer::AcceptPolicy> {
     match spec.get::<Value>("accept")? {
         Value::Nil => Ok(crate::minibuffer::AcceptPolicy::Candidate),
