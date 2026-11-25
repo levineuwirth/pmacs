@@ -20540,6 +20540,129 @@ Fix round 2's, in `pmacs-e10o` at `nice -n 19` with six build jobs, the runbook'
 
 So, after E10v's fix round 2: `main` is `df8c19a`, green. PR #540 is open at `9d9fd2e`, green on every job, not rerun; its red at `04e7557` was the branch's own row, fixed by a new commit. No row's count moves here.
 
+### E10aa: `main` green at `f64a2dc` and `de59feb`; PR #551 green at `437a9b0`
+
+Recorded 2026-11-25 by the E10aa session. Each run below was read from the run's jobs by conclusion and each test leg from its own log (fetched with escape sequences and stripped), every `running` line paired with its own result line; each run id and gate log was searched for in this file first, and none was here. `f64a2dc`'s runs were owed since that record was pushed, and `de59feb`'s since E10v's merge.
+
+#### `main` at `f64a2dc`, E10v fix round 2's registry record: green
+
+`CI` 45584079532 at `f64a2dc`, attempt 1 of 1, `push`, created 2026-11-25T09:18:01Z and completed 2026-11-25T09:20:15Z: `success`, the registry-push shape. The matrix job's name is its template, unexpanded, written here as earlier records write it.
+
+Tally (main-ci-f64a2dc): 15 = 6 + 9.
+
+Tally (main-ci-f64a2dc-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 139101096466 | success |
+| Lint (luajit) | 139101096896 | success |
+| Format | 139101096928 | success |
+| Changed paths | 139101097033 | success |
+| Lint (lua54) | 139101097039 | success |
+| Docs consistency | 139101223136 | success |
+| M1 Acceptance Gates | 139101225295 | skipped |
+| Test (matrix) | 139101225561 | skipped |
+| GPU Render (headless) | 139101225676 | skipped |
+| Perf budgets (debug) | 139101226534 | skipped |
+| M5 Perf Gates | 139101226663 | skipped |
+| Test (crdt) | 139101226999 | skipped |
+| M4 Perf Gates | 139101227039 | skipped |
+| M10 Perf Gates (crdt) | 139101227051 | skipped |
+| M6 Perf Gates | 139101227061 | skipped |
+
+Tally (main-ci-f64a2dc-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-f64a2dc-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45584079515 at `f64a2dc`, attempt 1 of 1, `push`, created 2026-11-25T09:18:01Z and completed 2026-11-25T09:18:15Z: `success`, `Grammar fuzz (asan-strict)` 139101095985, `Grammar fuzz` 139101096448.
+
+Tally (main-fuzz-f64a2dc): 2 = 2 + 0.
+
+#### `main` at `de59feb`, E10v's merge: green
+
+`CI` 45607771996 at `de59feb`, attempt 1 of 1, `push`, created 2026-11-25T11:48:01Z and completed 2026-11-25T12:46:37Z: `success`, 18 jobs succeeded and `Docs consistency` skipped, as a push that changes code skips it. Every test leg paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit)` 139183152999 on `ubuntu-24.04` `20261116.376.1`, 253, 5,986 / 0 / 88; `Test (ubuntu-latest / lua54)` 139183153041 on `ubuntu-24.04` `20261116.133.1`, 253, 5,986 / 0 / 88; `Test (macos-latest / luajit)` 139183152885 and `Test (macos-latest / lua54)` 139183152958 on `macos-26-arm64` `20261117.0516.1`, 254 each, 5,927 / 0 / 80; `Test (crdt)` 139183153192 on `ubuntu-24.04` `20261116.376.1`, 252, 5,927 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 139183153077 on `ubuntu-24.04` `20261116.133.1`, 253, 5,215 / 0 / 72.
+
+Tally (main-ci-de59feb): 19 = 18 + 1.
+
+Tally (main-ci-de59feb-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 139183010080 | success |
+| Format | 139183010598 | success |
+| Lint (lua54) | 139183010628 | success |
+| Changed paths | 139183010742 | success |
+| Lint (luajit) | 139183011215 | success |
+| GPU Render (headless) | 139183152806 | success |
+| M10 Perf Gates (crdt) | 139183152852 | success |
+| Perf budgets (debug) | 139183152883 | success |
+| Test (macos-latest / luajit) | 139183152885 | success |
+| M4 Perf Gates | 139183152900 | success |
+| M5 Perf Gates | 139183152946 | success |
+| Test (macos-latest / lua54) | 139183152958 | success |
+| M1 Acceptance Gates | 139183152973 | success |
+| Test (ubuntu-latest / luajit) | 139183152999 | success |
+| M6 Perf Gates | 139183153009 | success |
+| Test (ubuntu-latest / lua54) | 139183153041 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 139183153077 | success |
+| Test (crdt) | 139183153192 | success |
+| Docs consistency | 139183156149 | skipped |
+
+Tally (main-ci-de59feb-success): 18 rows of the table above with `result` = `success`.
+Tally (main-ci-de59feb-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45607772182 at `de59feb`, attempt 1 of 1, `push`, created 2026-11-25T11:48:02Z and completed 2026-11-25T11:48:20Z: `success`, `Grammar fuzz` 139183010375, `Grammar fuzz (asan-strict)` 139183010916.
+
+Tally (main-fuzz-de59feb): 2 = 2 + 0.
+
+#### PR #551 at `437a9b0`, E10aa's rule and its record: green
+
+`CI` 45662353667 at `437a9b0`, attempt 1 of 1, `pull_request` (the merge `3138b14` into `de59feb`), created 2026-11-25T17:12:57Z and completed 2026-11-25T18:10:07Z: `success`. Every test leg paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit)` 139375464523 on `ubuntu-24.04` `20261116.133.1`, 254, 6,016 / 0 / 88; `Test (ubuntu-latest / lua54)` 139375464704 on `ubuntu-24.04` `20261116.376.1`, 254, 6,016 / 0 / 88; `Test (macos-latest / luajit)` 139375464504 and `Test (macos-latest / lua54)` 139375464483 on `macos-26-arm64` `20261117.0516.1`, 255 each, 5,957 / 0 / 80; `Test (crdt)` 139375464105 on `ubuntu-24.04` `20261116.376.1`, 253, 5,957 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 139375464377 on `ubuntu-24.04` `20261122.23.1`, 254, 5,245 / 0 / 72. One `running` line and 30 rows more on each leg than at `de59feb`, read by name against `main`'s `Test (ubuntu-latest / luajit)` 139183152999: the new suite `e10aa_moved_selection_acceptance`'s 22 rows, `ok` on every leg, the 5 `common::ready` unit rows its binary links, and 3 unit rows in `src/minibuffer.rs`.
+
+Tally (pr551-ci-437a9b0): 19 = 18 + 1.
+
+Tally (pr551-ci-437a9b0-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 139375269516 | success |
+| Commit attribution (D9) | 139375270125 | success |
+| Lint (luajit) | 139375270143 | success |
+| Lint (lua54) | 139375270221 | success |
+| Changed paths | 139375270223 | success |
+| Test (crdt) | 139375464105 | success |
+| M1 Acceptance Gates | 139375464188 | success |
+| GPU Render (headless) | 139375464203 | success |
+| M4 Perf Gates | 139375464248 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 139375464377 | success |
+| M6 Perf Gates | 139375464414 | success |
+| M5 Perf Gates | 139375464439 | success |
+| Test (macos-latest / lua54) | 139375464483 | success |
+| Perf budgets (debug) | 139375464492 | success |
+| M10 Perf Gates (crdt) | 139375464496 | success |
+| Test (macos-latest / luajit) | 139375464504 | success |
+| Test (ubuntu-latest / luajit) | 139375464523 | success |
+| Test (ubuntu-latest / lua54) | 139375464704 | success |
+| Docs consistency | 139375466433 | skipped |
+
+Tally (pr551-ci-437a9b0-success): 18 rows of the table above with `result` = `success`.
+Tally (pr551-ci-437a9b0-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45662353670 at `437a9b0`, attempt 1 of 1, `pull_request`, created 2026-11-25T17:12:57Z and completed 2026-11-25T17:13:12Z: `success`, `Grammar fuzz` 139375269911, `Grammar fuzz (asan-strict)` 139375270785, each deciding `run=false` (no changed path can change the grammar set or the parse worker).
+
+Tally (pr551-fuzz-437a9b0): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+E10aa's, in `pmacs-e10o` at `nice -n 19` with six build jobs, the runbook's sampler beside each, the default plan, all three at `437a9b0`'s tree:
+
+- `20261125T161955Z-1723097`: the sweep red on one row, `e10v_1_the_client_advertises_version_support`, `EOF while parsing a value` at `tests/e10v_1_publish_version_acceptance.rs:435:89`, filed as #549; no daemon survived, 262 pairs, 6,416 / 1 / 88 (load 3.46 to 32.61).
+- `20261125T163854Z-1935074`: the sweep red on five rows, commented on #519, #498 and #400 and the two wheel rows filed as #550; no daemon survived, 262 pairs, 6,412 / 5 / 88 (load 2.33 to 27.36, with another project's build beside it).
+- `20261125T165646Z-2102109`: all passed, no daemon survived, 262 pairs, 6,417 / 0 / 88 (load 1.74 to 4.25).
+
+The new suite's 22 rows passed in all three.
+
+So, after E10aa: `main` is `de59feb`, green. PR #551 is open at `437a9b0`, green on every job, not rerun. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
